@@ -251,6 +251,173 @@ PRESENCE_EOF
   echo -e "${GREEN}[✓] Status patch applied.${NC}"
 }
 
+# ---------- Auto add: password-gated sshx terminal (NuflixCloud banner) ----------
+# 1) writes nuflix-login.sh next to the bot code
+# 2) patches lxcManager.js -> getSshxLink() pushes it into the container and
+#    starts sshx with:  sshx --shell /usr/local/bin/nuflix-login
+# Fail-closed: if the login script cannot be pushed, no sshx link is created.
+# Guarded: if the bot code looks different, it skips safely.
+patch_sshx_login() {
+  if [ ! -f lxcManager.js ]; then
+    fail "SSHX patch skipped: lxcManager.js not found."
+    return 0
+  fi
+
+  if grep -q "nuflix-login" lxcManager.js; then
+    echo -e "${GREEN}[i] SSHX patch: already applied.${NC}"
+    return 0
+  fi
+
+  local n_nohup n_out
+  n_nohup=$(grep -c "nohup sshx > /tmp/.nuflixcloud_sshx.log" lxcManager.js)
+  n_out=$(grep -c "const out = run(LXC_BIN, \['exec', containerName, '--', 'bash', '-c', script\], { timeout: 45_000 });" lxcManager.js)
+  if [ "$n_nohup" -ne 1 ] || [ "$n_out" -ne 1 ]; then
+    fail "SSHX patch skipped: getSshxLink() looks different in this bot version."
+    return 0
+  fi
+
+  step "Adding NuflixCloud sshx login (password + banner)..."
+  cp lxcManager.js lxcManager.js.bak
+
+  cat > nuflix-login.sh <<'NUFLIX_LOGIN_EOF'
+#!/bin/bash
+# ==================================================
+#  nuflix-login.sh — NuflixCloud secure terminal gate
+#  Used as the sshx shell:
+#      sshx --shell /usr/local/bin/nuflix-login
+#  Flow: ask password -> (root password of this VPS, same one shown on
+#        Discord) -> NuflixCloud banner + welcome -> normal bash shell.
+# ==================================================
+
+LOGIN_USER="${NUFLIX_USER:-root}"
+MAX_TRIES=3
+export TERM="${TERM:-xterm-256color}"
+
+PINK=$'\e[1;38;5;213m'
+GREEN=$'\e[1;32m'
+RED=$'\e[1;31m'
+CYAN=$'\e[1;36m'
+NC=$'\e[0m'
+
+trap 'echo; exit 1' INT
+trap '' TSTP
+
+# Password checker that ships with Ubuntu (libpam-modules). Works with any
+# hash type, and always checks the CURRENT password of the user.
+CHK=/usr/sbin/unix_chkpwd
+[ -x "$CHK" ] || CHK=/sbin/unix_chkpwd
+if [ ! -x "$CHK" ]; then
+  echo "${RED}[!] Password checker missing (libpam-modules). Access denied.${NC}"
+  sleep 2
+  exit 1
+fi
+
+check_password() {
+  printf '%s\0' "$1" | "$CHK" "$LOGIN_USER" nonull >/dev/null 2>&1
+}
+
+term_cols() {
+  local c
+  c=$(tput cols 2>/dev/null)
+  [[ "$c" =~ ^[0-9]+$ ]] || c=$(stty size 2>/dev/null | cut -d' ' -f2)
+  [[ "$c" =~ ^[0-9]+$ ]] || c=80
+  echo "$c"
+}
+
+show_banner() {
+  clear
+  printf '%s' "$PINK"
+  if [ "$(term_cols)" -ge 90 ]; then
+    cat <<'ART'
+███╗   ██╗██╗   ██╗███████╗██╗     ██╗██╗  ██╗ ██████╗██╗      ██████╗ ██╗   ██╗██████╗ 
+████╗  ██║██║   ██║██╔════╝██║     ██║╚██╗██╔╝██╔════╝██║     ██╔═══██╗██║   ██║██╔══██╗
+██╔██╗ ██║██║   ██║█████╗  ██║     ██║ ╚███╔╝ ██║     ██║     ██║   ██║██║   ██║██║  ██║
+██║╚██╗██║██║   ██║██╔══╝  ██║     ██║ ██╔██╗ ██║     ██║     ██║   ██║██║   ██║██║  ██║
+██║ ╚████║╚██████╔╝██║     ███████╗██║██╔╝ ██╗╚██████╗███████╗╚██████╔╝╚██████╔╝██████╔╝
+╚═╝  ╚═══╝ ╚═════╝ ╚═╝     ╚══════╝╚═╝╚═╝  ╚═╝ ╚═════╝╚══════╝ ╚═════╝  ╚═════╝ ╚═════╝ 
+ART
+  else
+    # narrow screens (phones): two lines
+    cat <<'ART'
+███╗   ██╗██╗   ██╗███████╗██╗     ██╗██╗  ██╗
+████╗  ██║██║   ██║██╔════╝██║     ██║╚██╗██╔╝
+██╔██╗ ██║██║   ██║█████╗  ██║     ██║ ╚███╔╝ 
+██║╚██╗██║██║   ██║██╔══╝  ██║     ██║ ██╔██╗ 
+██║ ╚████║╚██████╔╝██║     ███████╗██║██╔╝ ██╗
+╚═╝  ╚═══╝ ╚═════╝ ╚═╝     ╚══════╝╚═╝╚═╝  ╚═╝
+ ██████╗██╗      ██████╗ ██╗   ██╗██████╗ 
+██╔════╝██║     ██╔═══██╗██║   ██║██╔══██╗
+██║     ██║     ██║   ██║██║   ██║██║  ██║
+██║     ██║     ██║   ██║██║   ██║██║  ██║
+╚██████╗███████╗╚██████╔╝╚██████╔╝██████╔╝
+ ╚═════╝╚══════╝ ╚═════╝  ╚═════╝ ╚═════╝ 
+ART
+  fi
+  printf '%s\n' "$NC"
+  printf '%s🚀 Welcome To NuflixCloud Datacenter%s\n\n' "$GREEN" "$NC"
+}
+
+# ---------- Password prompt ----------
+clear
+printf '%s🔒 NuflixCloud Secure Terminal%s\n\n' "$CYAN" "$NC"
+
+ok=0
+for ((i = 1; i <= MAX_TRIES; i++)); do
+  printf 'Password: '
+  IFS= read -rs pw || { echo; break; }
+  echo
+  if check_password "$pw"; then
+    ok=1
+    break
+  fi
+  printf '%sIncorrect password. (%d/%d)%s\n' "$RED" "$i" "$MAX_TRIES" "$NC"
+  sleep 2
+done
+unset pw
+
+if [ "$ok" -ne 1 ]; then
+  printf '%sAccess denied.%s\n' "$RED" "$NC"
+  sleep 1
+  exit 1
+fi
+
+show_banner
+cd "$(getent passwd "$LOGIN_USER" | cut -d: -f6)" 2>/dev/null || cd /
+exec bash -l
+NUFLIX_LOGIN_EOF
+  chmod +x nuflix-login.sh
+
+  # (a) start sshx with the login script as its shell
+  sed -i 's|nohup sshx > /tmp/.nuflixcloud_sshx.log|nohup sshx --shell /usr/local/bin/nuflix-login > /tmp/.nuflixcloud_sshx.log|' lxcManager.js
+
+  # (b) push the login script into the container right before sshx is started
+  local ins_file line
+  ins_file=$(mktemp)
+  cat > "$ins_file" <<'INSERT_EOF'
+  // NuflixCloud: password-gated sshx terminal (fail closed if the login script can't be installed)
+  try {
+    run(LXC_BIN, ['file', 'push', require('path').join(__dirname, 'nuflix-login.sh'), `${containerName}/usr/local/bin/nuflix-login`, '--mode', '755']);
+  } catch (e) {
+    console.error('nuflix-login push failed:', e.message);
+    return null;
+  }
+INSERT_EOF
+  line=$(grep -n "const out = run(LXC_BIN, \['exec', containerName, '--', 'bash', '-c', script\], { timeout: 45_000 });" lxcManager.js | cut -d: -f1)
+  sed -i "$((line - 1))r $ins_file" lxcManager.js
+  rm -f "$ins_file"
+
+  # Safety net: if lxcManager.js no longer parses, roll everything back
+  if command -v node >/dev/null 2>&1 && ! node --check lxcManager.js 2>/dev/null; then
+    fail "SSHX patch broke lxcManager.js, rolling back."
+    mv -f lxcManager.js.bak lxcManager.js
+    rm -f nuflix-login.sh
+    return 0
+  fi
+
+  rm -f lxcManager.js.bak
+  echo -e "${GREEN}[✓] SSHX login patch applied.${NC}"
+}
+
 # ---------- Bot installer ----------
 # usage: install_bot <folder> <zip-name> <url> <status: yes|no>
 #   status=yes -> also adds the DND + rotating status (only used for V2)
@@ -277,13 +444,16 @@ install_bot() {
   rm -f "$ZIP"
 
   patch_hostname_fix
+  patch_sshx_login
 
   if [ "$STATUS" = "yes" ]; then
     patch_presence
   fi
 
   step "cp .env.example .env"
-  if [ -f .env.example ]; then
+  if [ -f .env ]; then
+    echo -e "${GREEN}[i] .env already exists, keeping it.${NC}"
+  elif [ -f .env.example ]; then
     cp .env.example .env
   else
     fail ".env.example not found (check the zip's folder structure)"
@@ -296,6 +466,14 @@ install_bot() {
   echo -e "${GREEN}[✓] $DIR setup finished.${NC}"
   pause
 }
+
+# ---------- Standalone patch mode ----------
+# Usage: bash <(curl -s URL) patch-sshx /root/shenzov1bot
+if [ "$1" = "patch-sshx" ]; then
+  cd "${2:-.}" || { fail "Folder not found: $2"; exit 1; }
+  patch_sshx_login
+  exit 0
+fi
 
 # ---------- Main loop ----------
 while true; do

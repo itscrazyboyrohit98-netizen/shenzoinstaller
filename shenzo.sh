@@ -1,7 +1,7 @@
 #!/bin/bash
 # ==================================================
 #   SHENZO BOT INSTALLER
-#   Run: bash <(curl -s https://shenzoinstaller.in)
+#   Run: bash <(curl -s https://raw.githubusercontent.com/itscrazyboyrohit98-netizen/shenzoinstaller/refs/heads/main/shenzo.sh)
 # ==================================================
 
 export PATH="$PATH:/snap/bin"
@@ -115,6 +115,142 @@ patch_hostname_fix() {
   done <<< "$files"
 }
 
+# ---------- Auto add: rotating status + DND ----------
+# Adds presence.js and hooks it into the bot's "ready" event.
+#   Watching: 🟢 X Running | 🟡 Y Created | 🔴 Z Suspended   (10s)
+#   Custom  : Created By - Shenzo                            (10s)
+#   Status  : DND
+# Every step is guarded: if the bot code looks different, it skips safely.
+patch_presence() {
+  if [ ! -f index.js ] || [ ! -f vpsStore.js ]; then
+    fail "Status patch skipped: index.js / vpsStore.js not found."
+    return 0
+  fi
+
+  if grep -q "startPresence" index.js; then
+    echo -e "${GREEN}[i] Status patch: already applied.${NC}"
+    return 0
+  fi
+
+  if ! grep -q "getAllRecords" vpsStore.js || ! grep -q "GatewayIntentBits" index.js; then
+    fail "Status patch skipped: unexpected bot code (needs discord.js v14 + vpsStore.getAllRecords)."
+    return 0
+  fi
+
+  local line
+  line=$(grep -nE "client\.(once|on)\(\s*(['\"](ready|clientReady)['\"]|Events\.(ClientReady|Ready))" index.js | head -n1 | cut -d: -f1)
+  if [ -z "$line" ] || ! sed -n "${line}p" index.js | grep -qE "\{\s*$"; then
+    fail "Status patch skipped: could not find the 'ready' event in index.js."
+    return 0
+  fi
+
+  if grep -qE "setActivity|setPresence" index.js; then
+    fail "Note: index.js already sets a presence. The new status will override it every 10s."
+  fi
+
+  step "Adding rotating status (DND + Created By - Shenzo)..."
+  cp index.js index.js.bak
+
+  cat > presence.js <<'PRESENCE_EOF'
+// presence.js — bot status: DND + rotates every 10 seconds
+const fs = require('fs');
+const { execFile } = require('child_process');
+const { ActivityType } = require('discord.js');
+const store = require('./vpsStore');
+
+const LXC_BIN = fs.existsSync('/snap/bin/lxc') ? '/snap/bin/lxc' : 'lxc';
+const INTERVAL_MS = 10 * 1000;
+const CREATED_BY_TEXT = 'Created By - Shenzo';
+
+let lastCounts = { running: 0, created: 0, suspended: 0 };
+
+function listRunningNames() {
+  return new Promise((resolve, reject) => {
+    execFile(
+      LXC_BIN,
+      ['list', '--format', 'json'],
+      { timeout: 8000, maxBuffer: 10 * 1024 * 1024 },
+      (err, stdout) => {
+        if (err) return reject(err);
+        try {
+          const list = JSON.parse(stdout);
+          resolve(new Set(list.filter((c) => c.status === 'Running').map((c) => c.name)));
+        } catch (e) {
+          reject(e);
+        }
+      }
+    );
+  });
+}
+
+async function getCounts() {
+  const records = store.getAllRecords();
+  const created = records.length;
+  const suspended = records.filter((v) => v.suspended).length;
+
+  let running = lastCounts.running;
+  try {
+    const runningNames = await listRunningNames();
+    running = records.filter((v) => runningNames.has(v.containerName)).length;
+  } catch (e) {
+    console.error('presence: lxc list failed:', e.message);
+  }
+
+  lastCounts = { running, created, suspended };
+  return lastCounts;
+}
+
+function startPresence(client) {
+  let showCounts = true;
+
+  const update = async () => {
+    try {
+      if (showCounts) {
+        const c = await getCounts();
+        client.user.setPresence({
+          status: 'dnd',
+          activities: [
+            {
+              name: `🟢 ${c.running} Running | 🟡 ${c.created} Created | 🔴 ${c.suspended} Suspended`,
+              type: ActivityType.Watching,
+            },
+          ],
+        });
+      } else {
+        client.user.setPresence({
+          status: 'dnd',
+          activities: [
+            { name: 'Custom Status', state: CREATED_BY_TEXT, type: ActivityType.Custom },
+          ],
+        });
+      }
+    } catch (e) {
+      console.error('presence error:', e.message);
+    }
+    showCounts = !showCounts;
+  };
+
+  update();
+  setInterval(update, INTERVAL_MS);
+}
+
+module.exports = { startPresence };
+PRESENCE_EOF
+
+  sed -i "${line}a\\  require('./presence').startPresence(client);" index.js
+
+  # Safety net: if index.js no longer parses, roll everything back
+  if command -v node >/dev/null 2>&1 && ! node --check index.js 2>/dev/null; then
+    fail "Status patch broke index.js, rolling back."
+    mv -f index.js.bak index.js
+    rm -f presence.js
+    return 0
+  fi
+
+  rm -f index.js.bak
+  echo -e "${GREEN}[✓] Status patch applied.${NC}"
+}
+
 # ---------- Bot installer ----------
 # usage: install_bot <folder> <zip-name> <url>
 install_bot() {
@@ -140,6 +276,7 @@ install_bot() {
   rm -f "$ZIP"
 
   patch_hostname_fix
+  patch_presence
 
   step "cp .env.example .env"
   if [ -f .env.example ]; then

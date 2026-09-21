@@ -252,9 +252,10 @@ PRESENCE_EOF
 }
 
 # ---------- Bot installer ----------
-# usage: install_bot <folder> <zip-name> <url>
+# usage: install_bot <folder> <zip-name> <url> <status: yes|no>
+#   status=yes -> also adds the DND + rotating status (only used for V2)
 install_bot() {
-  local DIR="$1" ZIP="$2" URL="$3"
+  local DIR="$1" ZIP="$2" URL="$3" STATUS="${4:-no}"
   local START_DIR="$PWD"
 
   step "mkdir $DIR"
@@ -276,7 +277,10 @@ install_bot() {
   rm -f "$ZIP"
 
   patch_hostname_fix
-  patch_presence
+
+  if [ "$STATUS" = "yes" ]; then
+    patch_presence
+  fi
 
   step "cp .env.example .env"
   if [ -f .env.example ]; then
@@ -300,8 +304,8 @@ while true; do
   read -r choice
 
   case "$choice" in
-    1) install_bot "shenzov1bot" "vpsv1.zip" "$V1_URL" ;;
-    2) install_bot "shenzov2bot" "vpsv2.zip" "$V2_URL" ;;
+    1) install_bot "shenzov1bot" "vpsv1.zip" "$V1_URL" "no" ;;
+    2) install_bot "shenzov2bot" "vpsv2.zip" "$V2_URL" "yes" ;;
     0)
       echo -e "${CYAN}GoodBye...${NC}"
       exit 0

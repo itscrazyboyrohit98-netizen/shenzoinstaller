@@ -94,6 +94,27 @@ lxd_setup() {
   lxd init
 }
 
+# ---------- Auto fix: "Failed to connect to bus" (hostnamectl) ----------
+# hostnamectl needs D-Bus, which is not ready inside a fresh LXC container.
+# Replace it with a plain command that works without D-Bus.
+patch_hostname_fix() {
+  local files
+  files=$(grep -rl "hostnamectl set-hostname" . \
+    --include="*.js" --include="*.mjs" --include="*.cjs" --include="*.ts" \
+    --exclude-dir=node_modules 2>/dev/null)
+
+  if [ -z "$files" ]; then
+    echo -e "${GREEN}[i] Hostname fix: nothing to patch.${NC}"
+    return 0
+  fi
+
+  step "Applying hostname fix (D-Bus error)..."
+  while read -r f; do
+    sed -i 's|hostnamectl set-hostname \([A-Za-z0-9_.${}-]*\)|echo \1 > /etc/hostname \&\& hostname \1|g' "$f"
+    echo -e "${GREEN}[✓] Patched: $f${NC}"
+  done <<< "$files"
+}
+
 # ---------- Bot installer ----------
 # usage: install_bot <folder> <zip-name> <url>
 install_bot() {
@@ -117,6 +138,8 @@ install_bot() {
 
   step "rm $ZIP"
   rm -f "$ZIP"
+
+  patch_hostname_fix
 
   step "cp .env.example .env"
   if [ -f .env.example ]; then

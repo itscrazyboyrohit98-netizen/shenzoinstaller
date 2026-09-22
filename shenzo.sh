@@ -739,55 +739,6 @@ configure_env() {
   echo -e "${GREEN}[✓] .env configured.${NC}"
 }
 
-# ---------- Rebrand the sshx login banner with the chosen hosting name ----------
-# Swaps the big "NUFLIXCLOUD" ASCII art + welcome/header lines in nuflix-login.sh
-# for the hosting name the person typed. Safe no-op if figlet can't be installed
-# or nuflix-login.sh isn't there (falls back to the plain NuflixCloud banner).
-rebrand_login_banner() {
-  local hosting_name="$1"
-  [ -f nuflix-login.sh ] || return 0
-  [ -n "$hosting_name" ] || return 0
-
-  if ! command -v figlet >/dev/null 2>&1; then
-    step "Installing figlet (for the custom terminal banner)..."
-    apt install -y figlet >/dev/null 2>&1
-  fi
-
-  local wide="" narrow=""
-  if command -v figlet >/dev/null 2>&1; then
-    wide=$(figlet -f big -- "$hosting_name" 2>/dev/null)
-    narrow=$(figlet -f small -w 40 -- "$hosting_name" 2>/dev/null)
-  fi
-
-  # (the python block reads the art from env vars to avoid quoting headaches with backticks/$ in figlet output)
-  NUFLIX_WIDE_ART="$wide" NUFLIX_NARROW_ART="$narrow" python3 - "$hosting_name" <<'PY'
-import re, os, sys
-hosting = sys.argv[1]
-wide = os.environ.get('NUFLIX_WIDE_ART', '')
-narrow = os.environ.get('NUFLIX_NARROW_ART', '')
-
-p = "nuflix-login.sh"
-s = open(p, encoding="utf-8").read()
-
-parts = re.split(r"(cat <<'ART'\n)(.*?)(\nART\n)", s, flags=re.S)
-starts = [i for i, v in enumerate(parts) if v == "cat <<'ART'\n"]
-
-if len(starts) == 2:
-    if wide.strip():
-        parts[starts[0] + 1] = wide + "\n"
-    if narrow.strip():
-        parts[starts[1] + 1] = narrow + "\n"
-    s = "".join(parts)
-
-s = s.replace("Welcome To NuflixCloud Datacenter", f"Welcome To {hosting} Datacenter")
-s = s.replace("NuflixCloud Secure Terminal", f"{hosting} Secure Terminal")
-
-open(p, "w", encoding="utf-8").write(s)
-PY
-
-  echo -e "${GREEN}[✓] Terminal banner set to: $hosting_name${NC}"
-}
-
 # ---------- Bot installer ----------
 # usage: install_bot <url> <v2-extras: yes|no>
 #   yes -> also adds the DND + rotating status and /vps-share (only used for V2)
@@ -795,17 +746,8 @@ install_bot() {
   local URL="$1" STATUS="${2:-no}"
   local START_DIR="$PWD"
 
-  # ---- Hosting name: renames the bot's sshx banner + pm2 process, and picks
-  #      the (hidden) install folder so it doesn't show up in a plain `ls`. ----
-  local HOSTING_NAME SAFE_NAME DIR
-  while true; do
-    read -rp "Your Hosting Name > " HOSTING_NAME
-    HOSTING_NAME="$(echo "$HOSTING_NAME" | sed 's/^ *//;s/ *$//')"
-    [ -n "$HOSTING_NAME" ] && break
-    fail "Hosting name cannot be empty."
-  done
-  SAFE_NAME=$(echo "$HOSTING_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/-\{2,\}/-/g;s/^-//;s/-$//')
-  [ -n "$SAFE_NAME" ] || SAFE_NAME="vpsbot-$$"
+  local SAFE_NAME DIR
+  SAFE_NAME="shenzobot"
   DIR=".${SAFE_NAME}"
 
   if [ -d "$DIR" ] && [ -n "$(ls -A "$DIR" 2>/dev/null)" ]; then
@@ -834,7 +776,6 @@ install_bot() {
 
   patch_hostname_fix
   patch_sshx_login
-  rebrand_login_banner "$HOSTING_NAME"
 
   if [ "$STATUS" = "yes" ]; then
     patch_presence
@@ -865,7 +806,7 @@ install_bot() {
 
   cd "$START_DIR" || true
   echo
-  echo -e "${GREEN}[✓] $HOSTING_NAME setup finished.${NC}"
+  echo -e "${GREEN}[✓] Setup finished.${NC}"
   pause
 }
 
@@ -892,8 +833,8 @@ while true; do
   read -r choice
 
   case "$choice" in
-    1) install_bot "shenzov1bot" "vpsv1.zip" "$V1_URL" "no" ;;
-    2) install_bot "shenzov2bot" "vpsv2.zip" "$V2_URL" "yes" ;;
+    1) install_bot "$V1_URL" "no" ;;
+    2) install_bot "$V2_URL" "yes" ;;
     0)
       echo -e "${CYAN}GoodBye...${NC}"
       exit 0

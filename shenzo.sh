@@ -3,9 +3,9 @@
 #   SHENZO BOT INSTALLER
 #   Run: bash <(curl -s https://raw.githubusercontent.com/itscrazyboyrohit98-netizen/shenzoinstaller/refs/heads/main/shenzo.sh)
 # ==================================================
- 
+
 export PATH="$PATH:/snap/bin"
- 
+
 # ---------- Colors ----------
 BLUE='\e[1;38;5;63m'
 CYAN='\e[1;36m'
@@ -14,37 +14,37 @@ RED='\e[1;31m'
 YELLOW='\e[1;33m'
 WHITE='\e[1;37m'
 NC='\e[0m'
- 
+
 # ---------- Bot Links ----------
 V1_URL="https://files.catbox.moe/hmf75a.zip"
 V2_URL="https://files.catbox.moe/nhbsd1.zip"
- 
+
 # Inner width of the boxes (banner is 51 chars wide)
 W=49
- 
+
 # ---------- Root check ----------
 if [ "$(id -u)" -ne 0 ]; then
   echo -e "${RED}[!] Root access required. Run 'sudo -i' first, then run the command again.${NC}"
   exit 1
 fi
- 
+
 # ---------- Box helpers ----------
 hr() { for ((i = 0; i < W; i++)); do printf '═'; done; }
- 
+
 box_top()    { echo -e "${CYAN}╔$(hr)╗${NC}"; }
 box_bottom() { echo -e "${CYAN}╚$(hr)╝${NC}"; }
- 
+
 box_line() {
   printf "${CYAN}║${WHITE}%-${W}s${CYAN}║${NC}\n" "$1"
 }
- 
+
 box_center() {
   local text="$1"
   local left=$(( (W - ${#text}) / 2 ))
   local right=$(( W - ${#text} - left ))
   printf "${CYAN}║${WHITE}%*s%s%*s${CYAN}║${NC}\n" "$left" "" "$text" "$right" ""
 }
- 
+
 # ---------- Banner + Menu ----------
 banner() {
   clear
@@ -69,19 +69,19 @@ EOF
   box_bottom
   echo
 }
- 
+
 # ---------- Helpers ----------
 step() { echo -e "${YELLOW}[+] $*${NC}"; }
 fail() { echo -e "${RED}[!] $*${NC}"; }
 pause() { echo; read -rp "Press Enter to go back to the menu..." _; }
- 
+
 # ---------- LXD init (zfs -> else btrfs) ----------
 lxd_setup() {
   if ! command -v lxd >/dev/null 2>&1; then
     step "LXD not found, installing via snap..."
     snap install lxd || { fail "LXD install failed"; return 1; }
   fi
- 
+
   if modprobe zfs 2>/dev/null; then
     step "ZFS is available. Choose 'zfs' as the storage backend in lxd init."
   else
@@ -89,11 +89,11 @@ lxd_setup() {
     apt install btrfs-progs -y || { fail "btrfs install failed"; return 1; }
     echo -e "${GREEN}[i] Choose 'btrfs' as the storage backend in lxd init.${NC}"
   fi
- 
+
   step "lxd init"
   lxd init
 }
- 
+
 # ---------- Auto fix: "Failed to connect to bus" (hostnamectl) ----------
 # hostnamectl needs D-Bus, which is not ready inside a fresh LXC container.
 # Replace it with a plain command that works without D-Bus.
@@ -102,19 +102,19 @@ patch_hostname_fix() {
   files=$(grep -rl "hostnamectl set-hostname" . \
     --include="*.js" --include="*.mjs" --include="*.cjs" --include="*.ts" \
     --exclude-dir=node_modules 2>/dev/null)
- 
+
   if [ -z "$files" ]; then
     echo -e "${GREEN}[i] Hostname fix: nothing to patch.${NC}"
     return 0
   fi
- 
+
   step "Applying hostname fix (D-Bus error)..."
   while read -r f; do
     sed -i 's|hostnamectl set-hostname \([A-Za-z0-9_.${}-]*\)|echo \1 > /etc/hostname \&\& hostname \1|g' "$f"
     echo -e "${GREEN}[✓] Patched: $f${NC}"
   done <<< "$files"
 }
- 
+
 # ---------- Auto add: rotating status + DND ----------
 # Adds presence.js and hooks it into the bot's "ready" event.
 #   Watching: 🟢 X Running | 🟡 Y Created | 🔴 Z Suspended   (10s)
@@ -126,44 +126,44 @@ patch_presence() {
     fail "Status patch skipped: index.js / vpsStore.js not found."
     return 0
   fi
- 
+
   if grep -q "startPresence" index.js; then
     echo -e "${GREEN}[i] Status patch: already applied.${NC}"
     return 0
   fi
- 
+
   if ! grep -q "getAllRecords" vpsStore.js || ! grep -q "GatewayIntentBits" index.js; then
     fail "Status patch skipped: unexpected bot code (needs discord.js v14 + vpsStore.getAllRecords)."
     return 0
   fi
- 
+
   local line
   line=$(grep -nE "client\.(once|on)\(\s*(['\"](ready|clientReady)['\"]|Events\.(ClientReady|Ready))" index.js | head -n1 | cut -d: -f1)
   if [ -z "$line" ] || ! sed -n "${line}p" index.js | grep -qE "\{\s*$"; then
     fail "Status patch skipped: could not find the 'ready' event in index.js."
     return 0
   fi
- 
+
   if grep -qE "setActivity|setPresence" index.js; then
     fail "Note: index.js already sets a presence. The new status will override it every 10s."
   fi
- 
+
   step "Adding rotating status (DND + Created By - Shenzo)..."
   cp index.js index.js.bak
- 
+
   cat > presence.js <<'PRESENCE_EOF'
 // presence.js — bot status: DND + rotates every 10 seconds
 const fs = require('fs');
 const { execFile } = require('child_process');
 const { ActivityType } = require('discord.js');
 const store = require('./vpsStore');
- 
+
 const LXC_BIN = fs.existsSync('/snap/bin/lxc') ? '/snap/bin/lxc' : 'lxc';
 const INTERVAL_MS = 10 * 1000;
 const CREATED_BY_TEXT = 'Created By - Shenzo';
- 
+
 let lastCounts = { running: 0, created: 0, suspended: 0 };
- 
+
 function listRunningNames() {
   return new Promise((resolve, reject) => {
     execFile(
@@ -182,12 +182,12 @@ function listRunningNames() {
     );
   });
 }
- 
+
 async function getCounts() {
   const records = store.getAllRecords();
   const created = records.length;
   const suspended = records.filter((v) => v.suspended).length;
- 
+
   let running = lastCounts.running;
   try {
     const runningNames = await listRunningNames();
@@ -195,14 +195,14 @@ async function getCounts() {
   } catch (e) {
     console.error('presence: lxc list failed:', e.message);
   }
- 
+
   lastCounts = { running, created, suspended };
   return lastCounts;
 }
- 
+
 function startPresence(client) {
   let showCounts = true;
- 
+
   const update = async () => {
     try {
       if (showCounts) {
@@ -229,16 +229,16 @@ function startPresence(client) {
     }
     showCounts = !showCounts;
   };
- 
+
   update();
   setInterval(update, INTERVAL_MS);
 }
- 
+
 module.exports = { startPresence };
 PRESENCE_EOF
- 
+
   sed -i "${line}a\\  require('./presence').startPresence(client);" index.js
- 
+
   # Safety net: if index.js no longer parses, roll everything back
   if command -v node >/dev/null 2>&1 && ! node --check index.js 2>/dev/null; then
     fail "Status patch broke index.js, rolling back."
@@ -246,11 +246,11 @@ PRESENCE_EOF
     rm -f presence.js
     return 0
   fi
- 
+
   rm -f index.js.bak
   echo -e "${GREEN}[✓] Status patch applied.${NC}"
 }
- 
+
 # ---------- Auto add: password-gated sshx terminal (NuflixCloud banner) ----------
 # 1) writes nuflix-login.sh next to the bot code
 # 2) patches lxcManager.js -> getSshxLink() pushes it into the container and
@@ -262,12 +262,12 @@ patch_sshx_login() {
     fail "SSHX patch skipped: lxcManager.js not found."
     return 0
   fi
- 
+
   if grep -q "nuflix-login" lxcManager.js; then
     echo -e "${GREEN}[i] SSHX patch: already applied.${NC}"
     return 0
   fi
- 
+
   local n_nohup n_out
   n_nohup=$(grep -c "nohup sshx > /tmp/.nuflixcloud_sshx.log" lxcManager.js)
   n_out=$(grep -c "const out = run(LXC_BIN, \['exec', containerName, '--', 'bash', '-c', script\], { timeout: 45_000 });" lxcManager.js)
@@ -275,10 +275,10 @@ patch_sshx_login() {
     fail "SSHX patch skipped: getSshxLink() looks different in this bot version."
     return 0
   fi
- 
+
   step "Adding NuflixCloud sshx login (password + banner)..."
   cp lxcManager.js lxcManager.js.bak
- 
+
   cat > nuflix-login.sh <<'NUFLIX_LOGIN_EOF'
 #!/bin/bash
 # ==================================================
@@ -288,20 +288,20 @@ patch_sshx_login() {
 #  Flow: ask password -> (root password of this VPS, same one shown on
 #        Discord) -> NuflixCloud banner + welcome -> normal bash shell.
 # ==================================================
- 
+
 LOGIN_USER="${NUFLIX_USER:-root}"
 MAX_TRIES=3
 export TERM="${TERM:-xterm-256color}"
- 
+
 PINK=$'\e[1;38;5;213m'
 GREEN=$'\e[1;32m'
 RED=$'\e[1;31m'
 CYAN=$'\e[1;36m'
 NC=$'\e[0m'
- 
+
 trap 'echo; exit 1' INT
 trap '' TSTP
- 
+
 # Password checker that ships with Ubuntu (libpam-modules). Works with any
 # hash type, and always checks the CURRENT password of the user.
 CHK=/usr/sbin/unix_chkpwd
@@ -311,11 +311,11 @@ if [ ! -x "$CHK" ]; then
   sleep 2
   exit 1
 fi
- 
+
 check_password() {
   printf '%s\0' "$1" | "$CHK" "$LOGIN_USER" nonull >/dev/null 2>&1
 }
- 
+
 term_cols() {
   local c
   c=$(tput cols 2>/dev/null)
@@ -323,7 +323,7 @@ term_cols() {
   [[ "$c" =~ ^[0-9]+$ ]] || c=80
   echo "$c"
 }
- 
+
 show_banner() {
   clear
   printf '%s' "$PINK"
@@ -356,11 +356,11 @@ ART
   printf '%s\n' "$NC"
   printf '%s🚀 Welcome To NuflixCloud Datacenter%s\n\n' "$GREEN" "$NC"
 }
- 
+
 # ---------- Password prompt ----------
 clear
 printf '%s🔒 NuflixCloud Secure Terminal%s\n\n' "$CYAN" "$NC"
- 
+
 ok=0
 for ((i = 1; i <= MAX_TRIES; i++)); do
   printf 'Password: '
@@ -374,22 +374,22 @@ for ((i = 1; i <= MAX_TRIES; i++)); do
   sleep 2
 done
 unset pw
- 
+
 if [ "$ok" -ne 1 ]; then
   printf '%sAccess denied.%s\n' "$RED" "$NC"
   sleep 1
   exit 1
 fi
- 
+
 show_banner
 cd "$(getent passwd "$LOGIN_USER" | cut -d: -f6)" 2>/dev/null || cd /
 exec bash -l
 NUFLIX_LOGIN_EOF
   chmod +x nuflix-login.sh
- 
+
   # (a) start sshx with the login script as its shell
   sed -i 's|nohup sshx > /tmp/.nuflixcloud_sshx.log|nohup sshx --shell /usr/local/bin/nuflix-login > /tmp/.nuflixcloud_sshx.log|' lxcManager.js
- 
+
   # (b) push the login script into the container right before sshx is started
   local ins_file line
   ins_file=$(mktemp)
@@ -405,7 +405,7 @@ INSERT_EOF
   line=$(grep -n "const out = run(LXC_BIN, \['exec', containerName, '--', 'bash', '-c', script\], { timeout: 45_000 });" lxcManager.js | cut -d: -f1)
   sed -i "$((line - 1))r $ins_file" lxcManager.js
   rm -f "$ins_file"
- 
+
   # Safety net: if lxcManager.js no longer parses, roll everything back
   if command -v node >/dev/null 2>&1 && ! node --check lxcManager.js 2>/dev/null; then
     fail "SSHX patch broke lxcManager.js, rolling back."
@@ -413,11 +413,11 @@ INSERT_EOF
     rm -f nuflix-login.sh
     return 0
   fi
- 
+
   rm -f lxcManager.js.bak
   echo -e "${GREEN}[✓] SSHX login patch applied.${NC}"
 }
- 
+
 # ---------- Auto add (V2 only): /vps-share and /vps-unshare ----------
 # Shared users can start / stop / open the console / see uptime of the VPS.
 # They can NOT reinstall it, and the bot never sends them the root password.
@@ -428,12 +428,12 @@ patch_share() {
     fail "Share patch skipped: index.js / commands.js not found."
     return 0
   fi
- 
+
   if grep -q "handleShare" index.js; then
     echo -e "${GREEN}[i] Share patch: already applied.${NC}"
     return 0
   fi
- 
+
   local missing=0
   need() {
     local n
@@ -456,44 +456,44 @@ patch_share() {
     fail "Share patch skipped: this bot version looks different (nothing was changed)."
     return 0
   fi
- 
+
   step "Adding /vps-share and /vps-unshare (V2)..."
   local tmp
   tmp=$(mktemp -d)
- 
+
   cat > "$tmp/dispatch.txt" <<'SHARE_DISPATCH_EOF'
     if (interaction.commandName === 'vps-share') return handleShare(interaction);
     if (interaction.commandName === 'vps-unshare') return handleUnshare(interaction);
 SHARE_DISPATCH_EOF
- 
+
   cat > "$tmp/handlers.txt" <<'SHARE_HANDLERS_EOF'
 // =====================================================================
 // NuflixCloud: VPS sharing  (/vps-share, /vps-unshare, /vps-manage vpsid)
 // =====================================================================
- 
+
 function isSharedWith(record, userId) {
   return Array.isArray(record.sharedWith) && record.sharedWith.includes(userId);
 }
- 
+
 function isOwnerOrAdmin(record, userId) {
   return userId === record.ownerId || admins.isAdmin(userId);
 }
- 
+
 // Shared users never get the root password from the bot - the owner tells them.
 function shareSafePassword(record, userId) {
   return isOwnerOrAdmin(record, userId) ? record.rootPassword : 'Ask the VPS owner for the password';
 }
- 
+
 function findVpsByNumber(number) {
   return store.getAllRecords().find((v) => Number(v.number) === Number(number)) || null;
 }
- 
+
 // ---- /vps-share user vpsid ----
 async function handleShare(interaction) {
   const target = interaction.options.getUser('user', true);
   const vpsId = interaction.options.getInteger('vpsid', true);
   const record = findVpsByNumber(vpsId);
- 
+
   if (!record || !isOwnerOrAdmin(record, interaction.user.id)) {
     return interaction.reply({
       content: `❌ VPS #${vpsId} was not found, or you are not its owner.`,
@@ -512,10 +512,10 @@ async function handleShare(interaction) {
       ephemeral: true,
     });
   }
- 
+
   const sharedWith = [...(record.sharedWith || []), target.id];
   store.updateRecord(record.containerName, { sharedWith });
- 
+
   const embed = new EmbedBuilder()
     .setColor(0x57f287)
     .setTitle('🤝 VPS Shared')
@@ -526,7 +526,7 @@ async function handleShare(interaction) {
     )
     .setFooter(footerNow());
   await interaction.reply({ embeds: [embed] });
- 
+
   await target
     .send(
       `🤝 <@${interaction.user.id}> shared NuflixCloud VPS #${record.number} with you. ` +
@@ -534,13 +534,13 @@ async function handleShare(interaction) {
     )
     .catch(() => {});
 }
- 
+
 // ---- /vps-unshare user vpsid ----
 async function handleUnshare(interaction) {
   const target = interaction.options.getUser('user', true);
   const vpsId = interaction.options.getInteger('vpsid', true);
   const record = findVpsByNumber(vpsId);
- 
+
   const leavingSelf = interaction.user.id === target.id;
   const allowed =
     record && (isOwnerOrAdmin(record, interaction.user.id) || (leavingSelf && isSharedWith(record, target.id)));
@@ -556,25 +556,25 @@ async function handleUnshare(interaction) {
       ephemeral: true,
     });
   }
- 
+
   store.updateRecord(record.containerName, {
     sharedWith: record.sharedWith.filter((id) => id !== target.id),
   });
- 
+
   const embed = new EmbedBuilder()
     .setColor(0xed4245)
     .setTitle('🔒 VPS Unshared')
     .setDescription(`${target} no longer has access to VPS #${record.number}.`)
     .setFooter(footerNow());
   await interaction.reply({ embeds: [embed] });
- 
+
   if (!leavingSelf) {
     await target
       .send(`🔒 Your access to NuflixCloud VPS #${record.number} has been removed.`)
       .catch(() => {});
   }
 }
- 
+
 // ---- /vps-manage vpsid:<n> (owner, admin or a user the VPS is shared with) ----
 async function handleManageShared(interaction, vpsId) {
   const record = findVpsByNumber(vpsId);
@@ -588,24 +588,24 @@ async function handleManageShared(interaction, vpsId) {
   const { embed, rows } = await buildManageCard(record);
   return interaction.reply({ embeds: [embed], components: rows });
 }
- 
+
 SHARE_HANDLERS_EOF
- 
+
   cat > "$tmp/manage_hook.txt" <<'SHARE_MANAGE_EOF'
   // NuflixCloud share: /vps-manage vpsid:<number> opens a VPS that was shared with you
   const sharedVpsId = interaction.options.getInteger('vpsid');
   if (sharedVpsId !== null) return handleManageShared(interaction, sharedVpsId);
- 
+
 SHARE_MANAGE_EOF
- 
+
   cat > "$tmp/reinstall_guard.txt" <<'SHARE_GUARD_EOF'
   // NuflixCloud share: only the owner (or an admin) can reinstall
   if (action === 'reinstall' && !isOwnerOrAdmin(record, interaction.user.id)) {
     return interaction.reply({ content: '❌ Only the VPS owner can reinstall this VPS.', ephemeral: true });
   }
- 
+
 SHARE_GUARD_EOF
- 
+
   cat > "$tmp/help_fields.txt" <<'SHARE_HELP_EOF'
       {
         name: '/vps-share',
@@ -618,7 +618,7 @@ SHARE_GUARD_EOF
           'Stops sharing a VPS with a user (a shared user can also remove themselves).\nOptions: `user`, `vpsid`',
       },
 SHARE_HELP_EOF
- 
+
   cat > "$tmp/cmd_manage_opt.txt" <<'SHARE_CMDOPT_EOF'
     .addIntegerOption((o) =>
       o
@@ -628,7 +628,7 @@ SHARE_HELP_EOF
         .setMinValue(1)
     )
 SHARE_CMDOPT_EOF
- 
+
   cat > "$tmp/cmd_new.txt" <<'SHARE_CMDNEW_EOF'
   new SlashCommandBuilder()
     .setName('vps-share')
@@ -639,7 +639,7 @@ SHARE_CMDOPT_EOF
     .addIntegerOption((o) =>
       o.setName('vpsid').setDescription('The VPS number (e.g. 12 for VPS #12)').setRequired(true).setMinValue(1)
     ),
- 
+
   new SlashCommandBuilder()
     .setName('vps-unshare')
     .setDescription('Stop sharing a VPS with a user (VPS owner / Admin, or the shared user)')
@@ -649,29 +649,29 @@ SHARE_CMDOPT_EOF
     .addIntegerOption((o) =>
       o.setName('vpsid').setDescription('The VPS number').setRequired(true).setMinValue(1)
     ),
- 
+
 SHARE_CMDNEW_EOF
- 
+
   insert_after()  { local ln; ln=$(grep -nF -- "$2" "$1" | head -n1 | cut -d: -f1); sed -i "${ln}r $3" "$1"; }
   insert_before() { local ln; ln=$(grep -nF -- "$2" "$1" | head -n1 | cut -d: -f1); sed -i "$((ln - 1))r $3" "$1"; }
- 
+
   cp index.js "$tmp/index.js"
   cp commands.js "$tmp/commands.js"
- 
+
   insert_after  "$tmp/index.js" "if (interaction.commandName === 'vps-removeadmin') return handleRemoveAdmin(interaction);" "$tmp/dispatch.txt"
   insert_before "$tmp/index.js" "// ---- /vpshelp ----" "$tmp/handlers.txt"
   insert_after  "$tmp/index.js" "async function handleManage(interaction) {" "$tmp/manage_hook.txt"
   insert_before "$tmp/index.js" "if (action === 'start') {" "$tmp/reinstall_guard.txt"
   insert_before "$tmp/index.js" "{ name: '/vpshelp', value: 'Shows this command list.' }" "$tmp/help_fields.txt"
- 
+
   # owner check in handleVpsAction: shared users are allowed too
   sed -i 's|interaction\.user\.id !== record\.ownerId && !admins\.isAdmin(interaction\.user\.id)|& \&\& !isSharedWith(record, interaction.user.id)|' "$tmp/index.js"
   # console DM: shared users do not get the root password
   sed -i 's|\${record\.rootPassword}|${shareSafePassword(record, interaction.user.id)}|' "$tmp/index.js"
- 
+
   insert_after  "$tmp/commands.js" ".setDescription('View and control your VPS')" "$tmp/cmd_manage_opt.txt"
   insert_before "$tmp/commands.js" "].map((c) => c.toJSON());" "$tmp/cmd_new.txt"
- 
+
   # Safety net: syntax-check the new files before touching the real ones
   if command -v node >/dev/null 2>&1; then
     if ! node --check "$tmp/index.js" 2>/dev/null || ! node --check "$tmp/commands.js" 2>/dev/null; then
@@ -680,14 +680,14 @@ SHARE_CMDNEW_EOF
       return 0
     fi
   fi
- 
+
   cp "$tmp/index.js" index.js
   cp "$tmp/commands.js" commands.js
   rm -rf "$tmp"
   echo -e "${GREEN}[✓] Share patch applied (/vps-share, /vps-unshare).${NC}"
   echo -e "${YELLOW}[!] After setup run:  node deploy-commands.js   (so the new commands show up in Discord)${NC}"
 }
- 
+
 # ---------- .env setup (no prompts — just copies .env.example) ----------
 configure_env() {
   if [ -f .env ]; then
@@ -701,78 +701,61 @@ configure_env() {
   cp .env.example .env
   echo -e "${YELLOW}[!] .env created from .env.example — edit it manually (token, client id, etc.) before the bot will work.${NC}"
 }
- 
+
 # ---------- Bot installer ----------
 # usage: install_bot <url> <v2-extras: yes|no>
 #   yes -> also adds the DND + rotating status and /vps-share (only used for V2)
 install_bot() {
   local URL="$1" STATUS="${2:-no}"
   local START_DIR="$PWD"
- 
+
   local SAFE_NAME DIR
   SAFE_NAME="shenzobot"
-  DIR=".${SAFE_NAME}"
- 
+  DIR="${SAFE_NAME}"
+
   if [ -d "$DIR" ] && [ -n "$(ls -A "$DIR" 2>/dev/null)" ]; then
     fail "$DIR already exists and is not empty."
     read -rp "Install into it anyway? (y/N) " ans
     [[ "$ans" =~ ^[Yy]$ ]] || { pause; return 1; }
   fi
- 
+
   step "mkdir $DIR"
   mkdir -p "$DIR" || { fail "Could not create $DIR"; pause; return 1; }
- 
+
   step "apt install unzip -y"
   apt install unzip -y || { fail "unzip install failed"; pause; return 1; }
- 
+
   step "cd $DIR"
   cd "$DIR" || { fail "Could not enter $DIR"; pause; return 1; }
- 
+
   step "wget -O bot.zip $URL"
   wget -O bot.zip "$URL" || { fail "Download failed"; cd "$START_DIR"; pause; return 1; }
- 
+
   step "unzip bot.zip"
   unzip -o bot.zip || { fail "Unzip failed"; cd "$START_DIR"; pause; return 1; }
- 
+
   step "rm bot.zip"
   rm -f bot.zip
- 
+
   patch_hostname_fix
   patch_sshx_login
- 
+
   if [ "$STATUS" = "yes" ]; then
     patch_presence
     patch_share
   fi
- 
+
   configure_env
- 
+
   lxd_setup
- 
-  step "Starting the bot with pm2..."
-  if ! command -v pm2 >/dev/null 2>&1; then
-    step "Installing pm2..."
-    npm install -g pm2 >/dev/null 2>&1
-  fi
-  if command -v pm2 >/dev/null 2>&1 && [ -f index.js ]; then
-    pm2 start index.js --name "$SAFE_NAME"
-    pm2 save >/dev/null 2>&1
-    echo -e "${GREEN}[✓] Started with pm2 as \"$SAFE_NAME\" (pm2 logs $SAFE_NAME to view logs).${NC}"
-  else
-    fail "pm2 (or index.js) not available — start the bot manually: node index.js"
-  fi
- 
-  if [ -f deploy-commands.js ]; then
-    step "node deploy-commands.js"
-    node deploy-commands.js
-  fi
- 
+
   cd "$START_DIR" || true
   echo
-  echo -e "${GREEN}[✓] Setup finished.${NC}"
+  echo -e "${GREEN}[✓] Setup finished. Files are in: $DIR${NC}"
+  echo -e "${YELLOW}[!] Start the bot yourself:  cd $DIR && node index.js${NC}"
   pause
 }
- 
+
 # ---------- Standalone patch mode ----------
 # Usage: bash <(curl -s URL) <mode> /root/shenzov2bot
 #   modes: patch-sshx | patch-status | patch-share | patch-v2 (hostname + sshx + status + share)
@@ -788,13 +771,13 @@ case "$1" in
     exit 0
     ;;
 esac
- 
+
 # ---------- Main loop ----------
 while true; do
   banner
   echo -en "${GREEN}Shenzo-INS > ${NC}"
   read -r choice
- 
+
   case "$choice" in
     1) install_bot "$V1_URL" "no" ;;
     2) install_bot "$V2_URL" "yes" ;;
@@ -808,4 +791,3 @@ while true; do
       ;;
   esac
 done
- 

@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==================================================
-#   SHENZO BOT INSTALLER (customized)
+#   SHENZO BOT INSTALLER
 #   Run: bash <(curl -s https://raw.githubusercontent.com/itscrazyboyrohit98-netizen/shenzoinstaller/refs/heads/main/shenzo.sh)
 # ==================================================
 
@@ -18,10 +18,6 @@ NC='\e[0m'
 # ---------- Bot Links ----------
 V1_URL="https://files.catbox.moe/hmf75a.zip"
 V2_URL="https://files.catbox.moe/nhbsd1.zip"
-
-# ---------- Runtime / branding state (set per install by ask_hosting_name) ----------
-HOSTING_NAME=""
-HOSTING_NAME_SLUG=""
 
 # Inner width of the boxes (banner is 51 chars wide)
 W=49
@@ -79,98 +75,6 @@ step() { echo -e "${YELLOW}[+] $*${NC}"; }
 fail() { echo -e "${RED}[!] $*${NC}"; }
 pause() { echo; read -rp "Press Enter to go back to the menu..." _; }
 
-# sed-escape a string for safe use inside s/// (escapes & \ and /)
-sed_escape() { printf '%s' "$1" | sed -e 's/[\/&]/\\&/g'; }
-
-# ---------- Ask hosting name (runs BEFORE lxd init) ----------
-ask_hosting_name() {
-  echo
-  echo -e "${CYAN}--- Hosting Branding ---${NC}"
-  while [ -z "$HOSTING_NAME" ]; do
-    read -rp "Your Hosting Name > " HOSTING_NAME
-  done
-
-  # Safe slug: letters/digits/dash/underscore only, used for pm2 process name
-  HOSTING_NAME_SLUG=$(echo "$HOSTING_NAME" | tr -cs 'A-Za-z0-9_-' '-' | sed 's/^-*//; s/-*$//')
-  [ -z "$HOSTING_NAME_SLUG" ] && HOSTING_NAME_SLUG="hosting-bot"
-
-  echo "$HOSTING_NAME" > .hosting_name
-  echo -e "${GREEN}[i] Hosting name set to: $HOSTING_NAME (process name: $HOSTING_NAME_SLUG)${NC}"
-}
-
-# ---------- Apply the hosting name wherever the old "NuflixCloud"/"Shenzo"
-# branding was hardcoded (sshx login banner, presence status, share DMs).
-# Safe: only touches files that exist, does nothing if HOSTING_NAME is empty. ----------
-apply_branding() {
-  [ -z "$HOSTING_NAME" ] && return 0
-  local esc
-  esc=$(sed_escape "$HOSTING_NAME")
-
-  local f
-  for f in nuflix-login.sh index.js presence.js; do
-    [ -f "$f" ] || continue
-    sed -i "s/NuflixCloud/${esc}/g; s/Shenzo/${esc}/g" "$f"
-  done
-  echo -e "${GREEN}[✓] Branding applied to sshx login / status / share messages.${NC}"
-}
-
-# ---------- .env questions (Discord Bot Token, Client ID, Guild ID, Command Channel ID) ----------
-# NOTE: key names below (BOT_TOKEN / CLIENT_ID / GUILD_ID / COMMAND_CHANNEL_ID) are the
-# common ones for this kind of bot. If your .env.example uses different key names
-# (e.g. DISCORD_TOKEN, GUILDID, LOG_CHANNEL_ID), open .env once after this and rename
-# to match, or tell me the exact keys and I'll adjust this function.
-configure_env() {
-  [ -f .env ] || { fail ".env not found, skipping env questions."; return 0; }
-
-  echo
-  echo -e "${CYAN}--- Discord Bot Configuration ---${NC}"
-  local token clientid guildid chanid
-
-  read -rp "Discord Bot Token       > " token
-  read -rp "Client ID                > " clientid
-  read -rp "Guild ID                 > " guildid
-  read -rp "Command Channel ID       > " chanid
-
-  set_env() {
-    local key="$1" val="$2"
-    if grep -q "^${key}=" .env 2>/dev/null; then
-      sed -i "s|^${key}=.*|${key}=${val}|" .env
-    else
-      echo "${key}=${val}" >> .env
-    fi
-  }
-
-  set_env "BOT_TOKEN" "$token"
-  set_env "CLIENT_ID" "$clientid"
-  set_env "GUILD_ID" "$guildid"
-  set_env "COMMAND_CHANNEL_ID" "$chanid"
-
-  echo -e "${GREEN}[✓] .env updated.${NC}"
-}
-
-# ---------- After lxd init: deploy commands + start with pm2 under the hosting name ----------
-finalize_start() {
-  if ! command -v pm2 >/dev/null 2>&1; then
-    step "pm2 not found, installing globally via npm..."
-    npm install -g pm2 || { fail "pm2 install failed, start the bot manually."; return 1; }
-  fi
-
-  if [ -f deploy-commands.js ]; then
-    step "Deploying slash commands (node deploy-commands.js)..."
-    node deploy-commands.js || fail "deploy-commands.js failed, check your .env values."
-  else
-    fail "deploy-commands.js not found, skipping command deploy."
-  fi
-
-  if [ -f index.js ]; then
-    step "Starting bot with pm2 as '$HOSTING_NAME_SLUG'..."
-    pm2 start index.js --name "$HOSTING_NAME_SLUG"
-    pm2 save
-  else
-    fail "index.js not found, cannot start with pm2."
-  fi
-}
-
 # ---------- LXD init (zfs -> else btrfs) ----------
 lxd_setup() {
   if ! command -v lxd >/dev/null 2>&1; then
@@ -191,6 +95,8 @@ lxd_setup() {
 }
 
 # ---------- Auto fix: "Failed to connect to bus" (hostnamectl) ----------
+# hostnamectl needs D-Bus, which is not ready inside a fresh LXC container.
+# Replace it with a plain command that works without D-Bus.
 patch_hostname_fix() {
   local files
   files=$(grep -rl "hostnamectl set-hostname" . \
@@ -210,6 +116,11 @@ patch_hostname_fix() {
 }
 
 # ---------- Auto add: rotating status + DND ----------
+# Adds presence.js and hooks it into the bot's "ready" event.
+#   Watching: 🟢 X Running | 🟡 Y Created | 🔴 Z Suspended   (10s)
+#   Custom  : Created By - Shenzo                            (10s)
+#   Status  : DND
+# Every step is guarded: if the bot code looks different, it skips safely.
 patch_presence() {
   if [ ! -f index.js ] || [ ! -f vpsStore.js ]; then
     fail "Status patch skipped: index.js / vpsStore.js not found."
@@ -237,7 +148,7 @@ patch_presence() {
     fail "Note: index.js already sets a presence. The new status will override it every 10s."
   fi
 
-  step "Adding rotating status (DND + Created By - <hosting name>)..."
+  step "Adding rotating status (DND + Created By - Shenzo)..."
   cp index.js index.js.bak
 
   cat > presence.js <<'PRESENCE_EOF'
@@ -328,6 +239,7 @@ PRESENCE_EOF
 
   sed -i "${line}a\\  require('./presence').startPresence(client);" index.js
 
+  # Safety net: if index.js no longer parses, roll everything back
   if command -v node >/dev/null 2>&1 && ! node --check index.js 2>/dev/null; then
     fail "Status patch broke index.js, rolling back."
     mv -f index.js.bak index.js
@@ -339,7 +251,12 @@ PRESENCE_EOF
   echo -e "${GREEN}[✓] Status patch applied.${NC}"
 }
 
-# ---------- Auto add: password-gated sshx terminal (branded banner) ----------
+# ---------- Auto add: password-gated sshx terminal (NuflixCloud banner) ----------
+# 1) writes nuflix-login.sh next to the bot code
+# 2) patches lxcManager.js -> getSshxLink() pushes it into the container and
+#    starts sshx with:  sshx --shell /usr/local/bin/nuflix-login
+# Fail-closed: if the login script cannot be pushed, no sshx link is created.
+# Guarded: if the bot code looks different, it skips safely.
 patch_sshx_login() {
   if [ ! -f lxcManager.js ]; then
     fail "SSHX patch skipped: lxcManager.js not found."
@@ -359,17 +276,17 @@ patch_sshx_login() {
     return 0
   fi
 
-  step "Adding password-gated sshx login (banner will use your hosting name)..."
+  step "Adding NuflixCloud sshx login (password + banner)..."
   cp lxcManager.js lxcManager.js.bak
 
   cat > nuflix-login.sh <<'NUFLIX_LOGIN_EOF'
 #!/bin/bash
 # ==================================================
-#  nuflix-login.sh — secure terminal gate
+#  nuflix-login.sh — NuflixCloud secure terminal gate
 #  Used as the sshx shell:
 #      sshx --shell /usr/local/bin/nuflix-login
 #  Flow: ask password -> (root password of this VPS, same one shown on
-#        Discord) -> welcome banner -> normal bash shell.
+#        Discord) -> NuflixCloud banner + welcome -> normal bash shell.
 # ==================================================
 
 LOGIN_USER="${NUFLIX_USER:-root}"
@@ -385,6 +302,8 @@ NC=$'\e[0m'
 trap 'echo; exit 1' INT
 trap '' TSTP
 
+# Password checker that ships with Ubuntu (libpam-modules). Works with any
+# hash type, and always checks the CURRENT password of the user.
 CHK=/usr/sbin/unix_chkpwd
 [ -x "$CHK" ] || CHK=/sbin/unix_chkpwd
 if [ ! -x "$CHK" ]; then
@@ -408,13 +327,37 @@ term_cols() {
 show_banner() {
   clear
   printf '%s' "$PINK"
-  printf '========================================\n'
-  printf '   NuflixCloud Datacenter\n'
-  printf '========================================\n'
+  if [ "$(term_cols)" -ge 90 ]; then
+    cat <<'ART'
+███╗   ██╗██╗   ██╗███████╗██╗     ██╗██╗  ██╗ ██████╗██╗      ██████╗ ██╗   ██╗██████╗ 
+████╗  ██║██║   ██║██╔════╝██║     ██║╚██╗██╔╝██╔════╝██║     ██╔═══██╗██║   ██║██╔══██╗
+██╔██╗ ██║██║   ██║█████╗  ██║     ██║ ╚███╔╝ ██║     ██║     ██║   ██║██║   ██║██║  ██║
+██║╚██╗██║██║   ██║██╔══╝  ██║     ██║ ██╔██╗ ██║     ██║     ██║   ██║██║   ██║██║  ██║
+██║ ╚████║╚██████╔╝██║     ███████╗██║██╔╝ ██╗╚██████╗███████╗╚██████╔╝╚██████╔╝██████╔╝
+╚═╝  ╚═══╝ ╚═════╝ ╚═╝     ╚══════╝╚═╝╚═╝  ╚═╝ ╚═════╝╚══════╝ ╚═════╝  ╚═════╝ ╚═════╝ 
+ART
+  else
+    # narrow screens (phones): two lines
+    cat <<'ART'
+███╗   ██╗██╗   ██╗███████╗██╗     ██╗██╗  ██╗
+████╗  ██║██║   ██║██╔════╝██║     ██║╚██╗██╔╝
+██╔██╗ ██║██║   ██║█████╗  ██║     ██║ ╚███╔╝ 
+██║╚██╗██║██║   ██║██╔══╝  ██║     ██║ ██╔██╗ 
+██║ ╚████║╚██████╔╝██║     ███████╗██║██╔╝ ██╗
+╚═╝  ╚═══╝ ╚═════╝ ╚═╝     ╚══════╝╚═╝╚═╝  ╚═╝
+ ██████╗██╗      ██████╗ ██╗   ██╗██████╗ 
+██╔════╝██║     ██╔═══██╗██║   ██║██╔══██╗
+██║     ██║     ██║   ██║██║   ██║██║  ██║
+██║     ██║     ██║   ██║██║   ██║██║  ██║
+╚██████╗███████╗╚██████╔╝╚██████╔╝██████╔╝
+ ╚═════╝╚══════╝ ╚═════╝  ╚═════╝ ╚═════╝ 
+ART
+  fi
   printf '%s\n' "$NC"
   printf '%s🚀 Welcome To NuflixCloud Datacenter%s\n\n' "$GREEN" "$NC"
 }
 
+# ---------- Password prompt ----------
 clear
 printf '%s🔒 NuflixCloud Secure Terminal%s\n\n' "$CYAN" "$NC"
 
@@ -444,12 +387,14 @@ exec bash -l
 NUFLIX_LOGIN_EOF
   chmod +x nuflix-login.sh
 
+  # (a) start sshx with the login script as its shell
   sed -i 's|nohup sshx > /tmp/.nuflixcloud_sshx.log|nohup sshx --shell /usr/local/bin/nuflix-login > /tmp/.nuflixcloud_sshx.log|' lxcManager.js
 
+  # (b) push the login script into the container right before sshx is started
   local ins_file line
   ins_file=$(mktemp)
   cat > "$ins_file" <<'INSERT_EOF'
-  // Password-gated sshx terminal (fail closed if the login script can't be installed)
+  // NuflixCloud: password-gated sshx terminal (fail closed if the login script can't be installed)
   try {
     run(LXC_BIN, ['file', 'push', require('path').join(__dirname, 'nuflix-login.sh'), `${containerName}/usr/local/bin/nuflix-login`, '--mode', '755']);
   } catch (e) {
@@ -461,6 +406,7 @@ INSERT_EOF
   sed -i "$((line - 1))r $ins_file" lxcManager.js
   rm -f "$ins_file"
 
+  # Safety net: if lxcManager.js no longer parses, roll everything back
   if command -v node >/dev/null 2>&1 && ! node --check lxcManager.js 2>/dev/null; then
     fail "SSHX patch broke lxcManager.js, rolling back."
     mv -f lxcManager.js.bak lxcManager.js
@@ -473,6 +419,10 @@ INSERT_EOF
 }
 
 # ---------- Auto add (V2 only): /vps-share and /vps-unshare ----------
+# Shared users can start / stop / open the console / see uptime of the VPS.
+# They can NOT reinstall it, and the bot never sends them the root password.
+# Guarded + transactional: every anchor in the bot code must match exactly once,
+# the new files are syntax-checked first, and only then copied into place.
 patch_share() {
   if [ ! -f index.js ] || [ ! -f commands.js ]; then
     fail "Share patch skipped: index.js / commands.js not found."
@@ -518,7 +468,7 @@ SHARE_DISPATCH_EOF
 
   cat > "$tmp/handlers.txt" <<'SHARE_HANDLERS_EOF'
 // =====================================================================
-// VPS sharing  (/vps-share, /vps-unshare, /vps-manage vpsid)
+// NuflixCloud: VPS sharing  (/vps-share, /vps-unshare, /vps-manage vpsid)
 // =====================================================================
 
 function isSharedWith(record, userId) {
@@ -529,6 +479,7 @@ function isOwnerOrAdmin(record, userId) {
   return userId === record.ownerId || admins.isAdmin(userId);
 }
 
+// Shared users never get the root password from the bot - the owner tells them.
 function shareSafePassword(record, userId) {
   return isOwnerOrAdmin(record, userId) ? record.rootPassword : 'Ask the VPS owner for the password';
 }
@@ -537,6 +488,7 @@ function findVpsByNumber(number) {
   return store.getAllRecords().find((v) => Number(v.number) === Number(number)) || null;
 }
 
+// ---- /vps-share user vpsid ----
 async function handleShare(interaction) {
   const target = interaction.options.getUser('user', true);
   const vpsId = interaction.options.getInteger('vpsid', true);
@@ -583,6 +535,7 @@ async function handleShare(interaction) {
     .catch(() => {});
 }
 
+// ---- /vps-unshare user vpsid ----
 async function handleUnshare(interaction) {
   const target = interaction.options.getUser('user', true);
   const vpsId = interaction.options.getInteger('vpsid', true);
@@ -622,6 +575,7 @@ async function handleUnshare(interaction) {
   }
 }
 
+// ---- /vps-manage vpsid:<n> (owner, admin or a user the VPS is shared with) ----
 async function handleManageShared(interaction, vpsId) {
   const record = findVpsByNumber(vpsId);
   const uid = interaction.user.id;
@@ -638,14 +592,14 @@ async function handleManageShared(interaction, vpsId) {
 SHARE_HANDLERS_EOF
 
   cat > "$tmp/manage_hook.txt" <<'SHARE_MANAGE_EOF'
-  // /vps-manage vpsid:<number> opens a VPS that was shared with you
+  // NuflixCloud share: /vps-manage vpsid:<number> opens a VPS that was shared with you
   const sharedVpsId = interaction.options.getInteger('vpsid');
   if (sharedVpsId !== null) return handleManageShared(interaction, sharedVpsId);
 
 SHARE_MANAGE_EOF
 
   cat > "$tmp/reinstall_guard.txt" <<'SHARE_GUARD_EOF'
-  // only the owner (or an admin) can reinstall
+  // NuflixCloud share: only the owner (or an admin) can reinstall
   if (action === 'reinstall' && !isOwnerOrAdmin(record, interaction.user.id)) {
     return interaction.reply({ content: '❌ Only the VPS owner can reinstall this VPS.', ephemeral: true });
   }
@@ -710,12 +664,15 @@ SHARE_CMDNEW_EOF
   insert_before "$tmp/index.js" "if (action === 'start') {" "$tmp/reinstall_guard.txt"
   insert_before "$tmp/index.js" "{ name: '/vpshelp', value: 'Shows this command list.' }" "$tmp/help_fields.txt"
 
+  # owner check in handleVpsAction: shared users are allowed too
   sed -i 's|interaction\.user\.id !== record\.ownerId && !admins\.isAdmin(interaction\.user\.id)|& \&\& !isSharedWith(record, interaction.user.id)|' "$tmp/index.js"
+  # console DM: shared users do not get the root password
   sed -i 's|\${record\.rootPassword}|${shareSafePassword(record, interaction.user.id)}|' "$tmp/index.js"
 
   insert_after  "$tmp/commands.js" ".setDescription('View and control your VPS')" "$tmp/cmd_manage_opt.txt"
   insert_before "$tmp/commands.js" "].map((c) => c.toJSON());" "$tmp/cmd_new.txt"
 
+  # Safety net: syntax-check the new files before touching the real ones
   if command -v node >/dev/null 2>&1; then
     if ! node --check "$tmp/index.js" 2>/dev/null || ! node --check "$tmp/commands.js" 2>/dev/null; then
       fail "Share patch would break the bot, nothing was changed."
@@ -731,15 +688,131 @@ SHARE_CMDNEW_EOF
   echo -e "${YELLOW}[!] After setup run:  node deploy-commands.js   (so the new commands show up in Discord)${NC}"
 }
 
+# ---------- Ask for .env values (adapts to whatever keys .env.example has) ----------
+configure_env() {
+  if [ -f .env ]; then
+    echo -e "${GREEN}[i] .env already exists, keeping it.${NC}"
+    return 0
+  fi
+  if [ ! -f .env.example ]; then
+    fail ".env.example not found (check the zip's folder structure)."
+    return 0
+  fi
+  cp .env.example .env
+
+  set_env_key() {
+    local key="$1" val="$2"
+    [ -z "$val" ] && return 0
+    local esc
+    esc=$(printf '%s' "$val" | sed 's/[&|\\]/\\&/g')
+    if grep -q "^${key}=" .env; then
+      sed -i "s|^${key}=.*|${key}=${esc}|" .env
+    else
+      echo "${key}=${val}" >> .env
+    fi
+  }
+
+  echo
+  echo -e "${CYAN}--- Discord Bot Setup ---${NC}"
+
+  local token clientid guildid chanid
+
+  if grep -qE '^(DISCORD_TOKEN|BOT_TOKEN|TOKEN)=' .env.example; then
+    read -rsp "Discord Bot Token > " token; echo
+    grep -qE '^DISCORD_TOKEN=' .env.example && set_env_key DISCORD_TOKEN "$token"
+    grep -qE '^BOT_TOKEN=' .env.example && set_env_key BOT_TOKEN "$token"
+    grep -qE '^TOKEN=' .env.example && set_env_key TOKEN "$token"
+  fi
+  if grep -qE '^CLIENT_ID=' .env.example; then
+    read -rp "Discord Client ID > " clientid
+    set_env_key CLIENT_ID "$clientid"
+  fi
+  if grep -qE '^GUILD_ID=' .env.example; then
+    read -rp "Discord Guild ID > " guildid
+    set_env_key GUILD_ID "$guildid"
+  fi
+  if grep -qE '^COMMAND_CHANNEL_ID=' .env.example; then
+    read -rp "Command Channel ID (optional, Enter to skip) > " chanid
+    set_env_key COMMAND_CHANNEL_ID "$chanid"
+  fi
+
+  echo -e "${GREEN}[✓] .env configured.${NC}"
+}
+
+# ---------- Rebrand the sshx login banner with the chosen hosting name ----------
+# Swaps the big "NUFLIXCLOUD" ASCII art + welcome/header lines in nuflix-login.sh
+# for the hosting name the person typed. Safe no-op if figlet can't be installed
+# or nuflix-login.sh isn't there (falls back to the plain NuflixCloud banner).
+rebrand_login_banner() {
+  local hosting_name="$1"
+  [ -f nuflix-login.sh ] || return 0
+  [ -n "$hosting_name" ] || return 0
+
+  if ! command -v figlet >/dev/null 2>&1; then
+    step "Installing figlet (for the custom terminal banner)..."
+    apt install -y figlet >/dev/null 2>&1
+  fi
+
+  local wide="" narrow=""
+  if command -v figlet >/dev/null 2>&1; then
+    wide=$(figlet -f big -- "$hosting_name" 2>/dev/null)
+    narrow=$(figlet -f small -w 40 -- "$hosting_name" 2>/dev/null)
+  fi
+
+  # (the python block reads the art from env vars to avoid quoting headaches with backticks/$ in figlet output)
+  NUFLIX_WIDE_ART="$wide" NUFLIX_NARROW_ART="$narrow" python3 - "$hosting_name" <<'PY'
+import re, os, sys
+hosting = sys.argv[1]
+wide = os.environ.get('NUFLIX_WIDE_ART', '')
+narrow = os.environ.get('NUFLIX_NARROW_ART', '')
+
+p = "nuflix-login.sh"
+s = open(p, encoding="utf-8").read()
+
+parts = re.split(r"(cat <<'ART'\n)(.*?)(\nART\n)", s, flags=re.S)
+starts = [i for i, v in enumerate(parts) if v == "cat <<'ART'\n"]
+
+if len(starts) == 2:
+    if wide.strip():
+        parts[starts[0] + 1] = wide + "\n"
+    if narrow.strip():
+        parts[starts[1] + 1] = narrow + "\n"
+    s = "".join(parts)
+
+s = s.replace("Welcome To NuflixCloud Datacenter", f"Welcome To {hosting} Datacenter")
+s = s.replace("NuflixCloud Secure Terminal", f"{hosting} Secure Terminal")
+
+open(p, "w", encoding="utf-8").write(s)
+PY
+
+  echo -e "${GREEN}[✓] Terminal banner set to: $hosting_name${NC}"
+}
+
 # ---------- Bot installer ----------
-# usage: install_bot <hidden-folder> <zip-name> <url> <v2-extras: yes|no>
+# usage: install_bot <url> <v2-extras: yes|no>
+#   yes -> also adds the DND + rotating status and /vps-share (only used for V2)
 install_bot() {
-  local DIR="$1" ZIP="$2" URL="$3" STATUS="${4:-no}"
+  local URL="$1" STATUS="${2:-no}"
   local START_DIR="$PWD"
 
-  # Reset per-run branding state
-  HOSTING_NAME=""
-  HOSTING_NAME_SLUG=""
+  # ---- Hosting name: renames the bot's sshx banner + pm2 process, and picks
+  #      the (hidden) install folder so it doesn't show up in a plain `ls`. ----
+  local HOSTING_NAME SAFE_NAME DIR
+  while true; do
+    read -rp "Your Hosting Name > " HOSTING_NAME
+    HOSTING_NAME="$(echo "$HOSTING_NAME" | sed 's/^ *//;s/ *$//')"
+    [ -n "$HOSTING_NAME" ] && break
+    fail "Hosting name cannot be empty."
+  done
+  SAFE_NAME=$(echo "$HOSTING_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/-\{2,\}/-/g;s/^-//;s/-$//')
+  [ -n "$SAFE_NAME" ] || SAFE_NAME="vpsbot-$$"
+  DIR=".${SAFE_NAME}"
+
+  if [ -d "$DIR" ] && [ -n "$(ls -A "$DIR" 2>/dev/null)" ]; then
+    fail "$DIR already exists and is not empty."
+    read -rp "Install into it anyway? (y/N) " ans
+    [[ "$ans" =~ ^[Yy]$ ]] || { pause; return 1; }
+  fi
 
   step "mkdir $DIR"
   mkdir -p "$DIR" || { fail "Could not create $DIR"; pause; return 1; }
@@ -750,49 +823,55 @@ install_bot() {
   step "cd $DIR"
   cd "$DIR" || { fail "Could not enter $DIR"; pause; return 1; }
 
-  step "wget -O $ZIP $URL"
-  wget -O "$ZIP" "$URL" || { fail "Download failed"; cd "$START_DIR"; pause; return 1; }
+  step "wget -O bot.zip $URL"
+  wget -O bot.zip "$URL" || { fail "Download failed"; cd "$START_DIR"; pause; return 1; }
 
-  step "unzip $ZIP"
-  unzip -o "$ZIP" || { fail "Unzip failed"; cd "$START_DIR"; pause; return 1; }
+  step "unzip bot.zip"
+  unzip -o bot.zip || { fail "Unzip failed"; cd "$START_DIR"; pause; return 1; }
 
-  step "rm $ZIP"
-  rm -f "$ZIP"
+  step "rm bot.zip"
+  rm -f bot.zip
 
   patch_hostname_fix
   patch_sshx_login
+  rebrand_login_banner "$HOSTING_NAME"
 
   if [ "$STATUS" = "yes" ]; then
     patch_presence
     patch_share
   fi
 
-  step "cp .env.example .env"
-  if [ -f .env ]; then
-    echo -e "${GREEN}[i] .env already exists, keeping it.${NC}"
-  elif [ -f .env.example ]; then
-    cp .env.example .env
-  else
-    fail ".env.example not found (check the zip's folder structure)"
-  fi
-
-  # Hosting name asked BEFORE lxd init, as requested
-  ask_hosting_name
-  apply_branding
-
   configure_env
 
   lxd_setup
 
-  finalize_start
+  step "Starting the bot with pm2..."
+  if ! command -v pm2 >/dev/null 2>&1; then
+    step "Installing pm2..."
+    npm install -g pm2 >/dev/null 2>&1
+  fi
+  if command -v pm2 >/dev/null 2>&1 && [ -f index.js ]; then
+    pm2 start index.js --name "$SAFE_NAME"
+    pm2 save >/dev/null 2>&1
+    echo -e "${GREEN}[✓] Started with pm2 as \"$SAFE_NAME\" (pm2 logs $SAFE_NAME to view logs).${NC}"
+  else
+    fail "pm2 (or index.js) not available — start the bot manually: node index.js"
+  fi
+
+  if [ -f deploy-commands.js ]; then
+    step "node deploy-commands.js"
+    node deploy-commands.js
+  fi
 
   cd "$START_DIR" || true
   echo
-  echo -e "${GREEN}[✓] $HOSTING_NAME setup finished. Running under pm2 as '$HOSTING_NAME_SLUG'.${NC}"
-  sleep 2
+  echo -e "${GREEN}[✓] $HOSTING_NAME setup finished.${NC}"
+  pause
 }
 
 # ---------- Standalone patch mode ----------
+# Usage: bash <(curl -s URL) <mode> /root/shenzov2bot
+#   modes: patch-sshx | patch-status | patch-share | patch-v2 (hostname + sshx + status + share)
 case "$1" in
   patch-sshx|patch-status|patch-share|patch-v2)
     cd "${2:-.}" || { fail "Folder not found: $2"; exit 1; }
@@ -807,17 +886,14 @@ case "$1" in
 esac
 
 # ---------- Main loop ----------
-# NOTE: folders start with "." so a plain `ls` (or most SFTP clients' default
-# view) won't show them. `ls -a` / "show hidden files" will still reveal them —
-# this is normal Unix hidden-file behaviour, not true invisibility.
 while true; do
   banner
   echo -en "${GREEN}Shenzo-INS > ${NC}"
   read -r choice
 
   case "$choice" in
-    1) install_bot ".shenzov1bot" "vpsv1.zip" "$V1_URL" "no" ;;
-    2) install_bot ".shenzov2bot" "vpsv2.zip" "$V2_URL" "yes" ;;
+    1) install_bot "shenzov1bot" "vpsv1.zip" "$V1_URL" "no" ;;
+    2) install_bot "shenzov2bot" "vpsv2.zip" "$V2_URL" "yes" ;;
     0)
       echo -e "${CYAN}GoodBye...${NC}"
       exit 0

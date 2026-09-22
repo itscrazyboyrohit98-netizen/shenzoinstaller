@@ -418,9 +418,279 @@ INSERT_EOF
   echo -e "${GREEN}[✓] SSHX login patch applied.${NC}"
 }
 
+# ---------- Auto add (V2 only): /vps-share and /vps-unshare ----------
+# Shared users can start / stop / open the console / see uptime of the VPS.
+# They can NOT reinstall it, and the bot never sends them the root password.
+# Guarded + transactional: every anchor in the bot code must match exactly once,
+# the new files are syntax-checked first, and only then copied into place.
+patch_share() {
+  if [ ! -f index.js ] || [ ! -f commands.js ]; then
+    fail "Share patch skipped: index.js / commands.js not found."
+    return 0
+  fi
+
+  if grep -q "handleShare" index.js; then
+    echo -e "${GREEN}[i] Share patch: already applied.${NC}"
+    return 0
+  fi
+
+  local missing=0
+  need() {
+    local n
+    n=$(grep -cF -- "$2" "$1")
+    if [ "$n" -ne 1 ]; then
+      fail "Share patch: expected exactly 1 match in $1 for: $2 (found $n)"
+      missing=1
+    fi
+  }
+  need index.js "if (interaction.commandName === 'vps-removeadmin') return handleRemoveAdmin(interaction);"
+  need index.js "// ---- /vpshelp ----"
+  need index.js "async function handleManage(interaction) {"
+  need index.js "interaction.user.id !== record.ownerId && !admins.isAdmin(interaction.user.id)"
+  need index.js "if (action === 'start') {"
+  need index.js '${record.rootPassword}'
+  need index.js "{ name: '/vpshelp', value: 'Shows this command list.' }"
+  need commands.js ".setDescription('View and control your VPS')"
+  need commands.js "].map((c) => c.toJSON());"
+  if [ "$missing" -ne 0 ]; then
+    fail "Share patch skipped: this bot version looks different (nothing was changed)."
+    return 0
+  fi
+
+  step "Adding /vps-share and /vps-unshare (V2)..."
+  local tmp
+  tmp=$(mktemp -d)
+
+  cat > "$tmp/dispatch.txt" <<'SHARE_DISPATCH_EOF'
+    if (interaction.commandName === 'vps-share') return handleShare(interaction);
+    if (interaction.commandName === 'vps-unshare') return handleUnshare(interaction);
+SHARE_DISPATCH_EOF
+
+  cat > "$tmp/handlers.txt" <<'SHARE_HANDLERS_EOF'
+// =====================================================================
+// NuflixCloud: VPS sharing  (/vps-share, /vps-unshare, /vps-manage vpsid)
+// =====================================================================
+
+function isSharedWith(record, userId) {
+  return Array.isArray(record.sharedWith) && record.sharedWith.includes(userId);
+}
+
+function isOwnerOrAdmin(record, userId) {
+  return userId === record.ownerId || admins.isAdmin(userId);
+}
+
+// Shared users never get the root password from the bot - the owner tells them.
+function shareSafePassword(record, userId) {
+  return isOwnerOrAdmin(record, userId) ? record.rootPassword : 'Ask the VPS owner for the password';
+}
+
+function findVpsByNumber(number) {
+  return store.getAllRecords().find((v) => Number(v.number) === Number(number)) || null;
+}
+
+// ---- /vps-share user vpsid ----
+async function handleShare(interaction) {
+  const target = interaction.options.getUser('user', true);
+  const vpsId = interaction.options.getInteger('vpsid', true);
+  const record = findVpsByNumber(vpsId);
+
+  if (!record || !isOwnerOrAdmin(record, interaction.user.id)) {
+    return interaction.reply({
+      content: `❌ VPS #${vpsId} was not found, or you are not its owner.`,
+      ephemeral: true,
+    });
+  }
+  if (target.bot) {
+    return interaction.reply({ content: '❌ You cannot share a VPS with a bot.', ephemeral: true });
+  }
+  if (target.id === record.ownerId) {
+    return interaction.reply({ content: `ℹ️ ${target} already owns VPS #${record.number}.`, ephemeral: true });
+  }
+  if (isSharedWith(record, target.id)) {
+    return interaction.reply({
+      content: `ℹ️ VPS #${record.number} is already shared with ${target}.`,
+      ephemeral: true,
+    });
+  }
+
+  const sharedWith = [...(record.sharedWith || []), target.id];
+  store.updateRecord(record.containerName, { sharedWith });
+
+  const embed = new EmbedBuilder()
+    .setColor(0x57f287)
+    .setTitle('🤝 VPS Shared')
+    .setDescription(
+      `VPS #${record.number} is now shared with ${target}.\n` +
+        `They can start, stop and open the console from \`/vps-manage vpsid:${record.number}\`.\n` +
+        `They cannot reinstall or share it. Give them the VPS password yourself (the bot does not send it).`
+    )
+    .setFooter(footerNow());
+  await interaction.reply({ embeds: [embed] });
+
+  await target
+    .send(
+      `🤝 <@${interaction.user.id}> shared NuflixCloud VPS #${record.number} with you. ` +
+        `Use \`/vps-manage vpsid:${record.number}\` to manage it. Ask the VPS owner for the console password.`
+    )
+    .catch(() => {});
+}
+
+// ---- /vps-unshare user vpsid ----
+async function handleUnshare(interaction) {
+  const target = interaction.options.getUser('user', true);
+  const vpsId = interaction.options.getInteger('vpsid', true);
+  const record = findVpsByNumber(vpsId);
+
+  const leavingSelf = interaction.user.id === target.id;
+  const allowed =
+    record && (isOwnerOrAdmin(record, interaction.user.id) || (leavingSelf && isSharedWith(record, target.id)));
+  if (!allowed) {
+    return interaction.reply({
+      content: `❌ VPS #${vpsId} was not found, or you are not its owner.`,
+      ephemeral: true,
+    });
+  }
+  if (!isSharedWith(record, target.id)) {
+    return interaction.reply({
+      content: `ℹ️ VPS #${record.number} is not shared with ${target}.`,
+      ephemeral: true,
+    });
+  }
+
+  store.updateRecord(record.containerName, {
+    sharedWith: record.sharedWith.filter((id) => id !== target.id),
+  });
+
+  const embed = new EmbedBuilder()
+    .setColor(0xed4245)
+    .setTitle('🔒 VPS Unshared')
+    .setDescription(`${target} no longer has access to VPS #${record.number}.`)
+    .setFooter(footerNow());
+  await interaction.reply({ embeds: [embed] });
+
+  if (!leavingSelf) {
+    await target
+      .send(`🔒 Your access to NuflixCloud VPS #${record.number} has been removed.`)
+      .catch(() => {});
+  }
+}
+
+// ---- /vps-manage vpsid:<n> (owner, admin or a user the VPS is shared with) ----
+async function handleManageShared(interaction, vpsId) {
+  const record = findVpsByNumber(vpsId);
+  const uid = interaction.user.id;
+  if (!record || !(isOwnerOrAdmin(record, uid) || isSharedWith(record, uid))) {
+    return interaction.reply({
+      content: `❌ VPS #${vpsId} was not found, or it is not shared with you.`,
+      ephemeral: true,
+    });
+  }
+  const { embed, rows } = await buildManageCard(record);
+  return interaction.reply({ embeds: [embed], components: rows });
+}
+
+SHARE_HANDLERS_EOF
+
+  cat > "$tmp/manage_hook.txt" <<'SHARE_MANAGE_EOF'
+  // NuflixCloud share: /vps-manage vpsid:<number> opens a VPS that was shared with you
+  const sharedVpsId = interaction.options.getInteger('vpsid');
+  if (sharedVpsId !== null) return handleManageShared(interaction, sharedVpsId);
+
+SHARE_MANAGE_EOF
+
+  cat > "$tmp/reinstall_guard.txt" <<'SHARE_GUARD_EOF'
+  // NuflixCloud share: only the owner (or an admin) can reinstall
+  if (action === 'reinstall' && !isOwnerOrAdmin(record, interaction.user.id)) {
+    return interaction.reply({ content: '❌ Only the VPS owner can reinstall this VPS.', ephemeral: true });
+  }
+
+SHARE_GUARD_EOF
+
+  cat > "$tmp/help_fields.txt" <<'SHARE_HELP_EOF'
+      {
+        name: '/vps-share',
+        value:
+          'Shares your VPS with another user so they can start, stop and open the console. **VPS owner / admin only.**\nThey open it with `/vps-manage vpsid:<number>`.\nOptions: `user`, `vpsid` (VPS number)',
+      },
+      {
+        name: '/vps-unshare',
+        value:
+          'Stops sharing a VPS with a user (a shared user can also remove themselves).\nOptions: `user`, `vpsid`',
+      },
+SHARE_HELP_EOF
+
+  cat > "$tmp/cmd_manage_opt.txt" <<'SHARE_CMDOPT_EOF'
+    .addIntegerOption((o) =>
+      o
+        .setName('vpsid')
+        .setDescription('Open a VPS that was shared with you (VPS number)')
+        .setRequired(false)
+        .setMinValue(1)
+    )
+SHARE_CMDOPT_EOF
+
+  cat > "$tmp/cmd_new.txt" <<'SHARE_CMDNEW_EOF'
+  new SlashCommandBuilder()
+    .setName('vps-share')
+    .setDescription('Share your VPS with another user (VPS owner / Admin only)')
+    .addUserOption((o) =>
+      o.setName('user').setDescription('The user to share the VPS with').setRequired(true)
+    )
+    .addIntegerOption((o) =>
+      o.setName('vpsid').setDescription('The VPS number (e.g. 12 for VPS #12)').setRequired(true).setMinValue(1)
+    ),
+
+  new SlashCommandBuilder()
+    .setName('vps-unshare')
+    .setDescription('Stop sharing a VPS with a user (VPS owner / Admin, or the shared user)')
+    .addUserOption((o) =>
+      o.setName('user').setDescription('The user to remove').setRequired(true)
+    )
+    .addIntegerOption((o) =>
+      o.setName('vpsid').setDescription('The VPS number').setRequired(true).setMinValue(1)
+    ),
+
+SHARE_CMDNEW_EOF
+
+  insert_after()  { local ln; ln=$(grep -nF -- "$2" "$1" | head -n1 | cut -d: -f1); sed -i "${ln}r $3" "$1"; }
+  insert_before() { local ln; ln=$(grep -nF -- "$2" "$1" | head -n1 | cut -d: -f1); sed -i "$((ln - 1))r $3" "$1"; }
+
+  cp index.js "$tmp/index.js"
+  cp commands.js "$tmp/commands.js"
+
+  insert_after  "$tmp/index.js" "if (interaction.commandName === 'vps-removeadmin') return handleRemoveAdmin(interaction);" "$tmp/dispatch.txt"
+  insert_before "$tmp/index.js" "// ---- /vpshelp ----" "$tmp/handlers.txt"
+  insert_after  "$tmp/index.js" "async function handleManage(interaction) {" "$tmp/manage_hook.txt"
+  insert_before "$tmp/index.js" "if (action === 'start') {" "$tmp/reinstall_guard.txt"
+  insert_before "$tmp/index.js" "{ name: '/vpshelp', value: 'Shows this command list.' }" "$tmp/help_fields.txt"
+
+  # owner check in handleVpsAction: shared users are allowed too
+  sed -i 's|interaction\.user\.id !== record\.ownerId && !admins\.isAdmin(interaction\.user\.id)|& \&\& !isSharedWith(record, interaction.user.id)|' "$tmp/index.js"
+  # console DM: shared users do not get the root password
+  sed -i 's|\${record\.rootPassword}|${shareSafePassword(record, interaction.user.id)}|' "$tmp/index.js"
+
+  insert_after  "$tmp/commands.js" ".setDescription('View and control your VPS')" "$tmp/cmd_manage_opt.txt"
+  insert_before "$tmp/commands.js" "].map((c) => c.toJSON());" "$tmp/cmd_new.txt"
+
+  # Safety net: syntax-check the new files before touching the real ones
+  if command -v node >/dev/null 2>&1; then
+    if ! node --check "$tmp/index.js" 2>/dev/null || ! node --check "$tmp/commands.js" 2>/dev/null; then
+      fail "Share patch would break the bot, nothing was changed."
+      rm -rf "$tmp"
+      return 0
+    fi
+  fi
+
+  cp "$tmp/index.js" index.js
+  cp "$tmp/commands.js" commands.js
+  rm -rf "$tmp"
+  echo -e "${GREEN}[✓] Share patch applied (/vps-share, /vps-unshare).${NC}"
+  echo -e "${YELLOW}[!] After setup run:  node deploy-commands.js   (so the new commands show up in Discord)${NC}"
+}
+
 # ---------- Bot installer ----------
-# usage: install_bot <folder> <zip-name> <url> <status: yes|no>
-#   status=yes -> also adds the DND + rotating status (only used for V2)
+# usage: install_bot <folder> <zip-name> <url> <v2-extras: yes|no>
+#   yes -> also adds the DND + rotating status and /vps-share (only used for V2)
 install_bot() {
   local DIR="$1" ZIP="$2" URL="$3" STATUS="${4:-no}"
   local START_DIR="$PWD"
@@ -448,6 +718,7 @@ install_bot() {
 
   if [ "$STATUS" = "yes" ]; then
     patch_presence
+    patch_share
   fi
 
   step "cp .env.example .env"
@@ -468,12 +739,20 @@ install_bot() {
 }
 
 # ---------- Standalone patch mode ----------
-# Usage: bash <(curl -s URL) patch-sshx /root/shenzov1bot
-if [ "$1" = "patch-sshx" ]; then
-  cd "${2:-.}" || { fail "Folder not found: $2"; exit 1; }
-  patch_sshx_login
-  exit 0
-fi
+# Usage: bash <(curl -s URL) <mode> /root/shenzov2bot
+#   modes: patch-sshx | patch-status | patch-share | patch-v2 (hostname + sshx + status + share)
+case "$1" in
+  patch-sshx|patch-status|patch-share|patch-v2)
+    cd "${2:-.}" || { fail "Folder not found: $2"; exit 1; }
+    case "$1" in
+      patch-sshx)   patch_sshx_login ;;
+      patch-status) patch_presence ;;
+      patch-share)  patch_share ;;
+      patch-v2)     patch_hostname_fix; patch_sshx_login; patch_presence; patch_share ;;
+    esac
+    exit 0
+    ;;
+esac
 
 # ---------- Main loop ----------
 while true; do

@@ -688,7 +688,7 @@ SHARE_CMDNEW_EOF
   echo -e "${YELLOW}[!] After setup run:  node deploy-commands.js   (so the new commands show up in Discord)${NC}"
 }
 
-# ---------- .env setup (no prompts — just copies .env.example) ----------
+# ---------- Ask for .env values (adapts to whatever keys .env.example has) ----------
 configure_env() {
   if [ -f .env ]; then
     echo -e "${GREEN}[i] .env already exists, keeping it.${NC}"
@@ -699,7 +699,93 @@ configure_env() {
     return 0
   fi
   cp .env.example .env
-  echo -e "${YELLOW}[!] .env created from .env.example — edit it manually (token, client id, etc.) before the bot will work.${NC}"
+
+  set_env_key() {
+    local key="$1" val="$2"
+    [ -z "$val" ] && return 0
+    local esc
+    esc=$(printf '%s' "$val" | sed 's/[&|\\]/\\&/g')
+    if grep -q "^${key}=" .env; then
+      sed -i "s|^${key}=.*|${key}=${esc}|" .env
+    else
+      echo "${key}=${val}" >> .env
+    fi
+  }
+
+  echo
+  echo -e "${CYAN}--- Discord Bot Setup ---${NC}"
+
+  local token clientid guildid chanid
+
+  if grep -qE '^(DISCORD_TOKEN|BOT_TOKEN|TOKEN)=' .env.example; then
+    read -rsp "Discord Bot Token > " token; echo
+    grep -qE '^DISCORD_TOKEN=' .env.example && set_env_key DISCORD_TOKEN "$token"
+    grep -qE '^BOT_TOKEN=' .env.example && set_env_key BOT_TOKEN "$token"
+    grep -qE '^TOKEN=' .env.example && set_env_key TOKEN "$token"
+  fi
+  if grep -qE '^CLIENT_ID=' .env.example; then
+    read -rp "Discord Client ID > " clientid
+    set_env_key CLIENT_ID "$clientid"
+  fi
+  if grep -qE '^GUILD_ID=' .env.example; then
+    read -rp "Discord Guild ID > " guildid
+    set_env_key GUILD_ID "$guildid"
+  fi
+  if grep -qE '^COMMAND_CHANNEL_ID=' .env.example; then
+    read -rp "Command Channel ID (optional, Enter to skip) > " chanid
+    set_env_key COMMAND_CHANNEL_ID "$chanid"
+  fi
+
+  echo -e "${GREEN}[✓] .env configured.${NC}"
+}
+
+# ---------- Rebrand the sshx login banner with the chosen hosting name ----------
+# Swaps the big "NUFLIXCLOUD" ASCII art + welcome/header lines in nuflix-login.sh
+# for the hosting name the person typed. Safe no-op if figlet can't be installed
+# or nuflix-login.sh isn't there (falls back to the plain NuflixCloud banner).
+rebrand_login_banner() {
+  local hosting_name="$1"
+  [ -f nuflix-login.sh ] || return 0
+  [ -n "$hosting_name" ] || return 0
+
+  if ! command -v figlet >/dev/null 2>&1; then
+    step "Installing figlet (for the custom terminal banner)..."
+    apt install -y figlet >/dev/null 2>&1
+  fi
+
+  local wide="" narrow=""
+  if command -v figlet >/dev/null 2>&1; then
+    wide=$(figlet -f big -- "$hosting_name" 2>/dev/null)
+    narrow=$(figlet -f small -w 40 -- "$hosting_name" 2>/dev/null)
+  fi
+
+  # (the python block reads the art from env vars to avoid quoting headaches with backticks/$ in figlet output)
+  NUFLIX_WIDE_ART="$wide" NUFLIX_NARROW_ART="$narrow" python3 - "$hosting_name" <<'PY'
+import re, os, sys
+hosting = sys.argv[1]
+wide = os.environ.get('NUFLIX_WIDE_ART', '')
+narrow = os.environ.get('NUFLIX_NARROW_ART', '')
+
+p = "nuflix-login.sh"
+s = open(p, encoding="utf-8").read()
+
+parts = re.split(r"(cat <<'ART'\n)(.*?)(\nART\n)", s, flags=re.S)
+starts = [i for i, v in enumerate(parts) if v == "cat <<'ART'\n"]
+
+if len(starts) == 2:
+    if wide.strip():
+        parts[starts[0] + 1] = wide + "\n"
+    if narrow.strip():
+        parts[starts[1] + 1] = narrow + "\n"
+    s = "".join(parts)
+
+s = s.replace("Welcome To NuflixCloud Datacenter", f"Welcome To {hosting} Datacenter")
+s = s.replace("NuflixCloud Secure Terminal", f"{hosting} Secure Terminal")
+
+open(p, "w", encoding="utf-8").write(s)
+PY
+
+  echo -e "${GREEN}[✓] Terminal banner set to: $hosting_name${NC}"
 }
 
 # ---------- Bot installer ----------
@@ -709,9 +795,18 @@ install_bot() {
   local URL="$1" STATUS="${2:-no}"
   local START_DIR="$PWD"
 
-  local SAFE_NAME DIR
-  SAFE_NAME="shenzobot"
-  DIR="${SAFE_NAME}"
+  # ---- Hosting name: renames the bot's sshx banner + pm2 process, and picks
+  #      the (hidden) install folder so it doesn't show up in a plain `ls`. ----
+  local HOSTING_NAME SAFE_NAME DIR
+  while true; do
+    read -rp "Your Hosting Name > " HOSTING_NAME
+    HOSTING_NAME="$(echo "$HOSTING_NAME" | sed 's/^ *//;s/ *$//')"
+    [ -n "$HOSTING_NAME" ] && break
+    fail "Hosting name cannot be empty."
+  done
+  SAFE_NAME=$(echo "$HOSTING_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/-\{2,\}/-/g;s/^-//;s/-$//')
+  [ -n "$SAFE_NAME" ] || SAFE_NAME="vpsbot-$$"
+  DIR=".${SAFE_NAME}"
 
   if [ -d "$DIR" ] && [ -n "$(ls -A "$DIR" 2>/dev/null)" ]; then
     fail "$DIR already exists and is not empty."
@@ -739,6 +834,7 @@ install_bot() {
 
   patch_hostname_fix
   patch_sshx_login
+  rebrand_login_banner "$HOSTING_NAME"
 
   if [ "$STATUS" = "yes" ]; then
     patch_presence
@@ -749,10 +845,27 @@ install_bot() {
 
   lxd_setup
 
+  step "Starting the bot with pm2..."
+  if ! command -v pm2 >/dev/null 2>&1; then
+    step "Installing pm2..."
+    npm install -g pm2 >/dev/null 2>&1
+  fi
+  if command -v pm2 >/dev/null 2>&1 && [ -f index.js ]; then
+    pm2 start index.js --name "$SAFE_NAME"
+    pm2 save >/dev/null 2>&1
+    echo -e "${GREEN}[✓] Started with pm2 as \"$SAFE_NAME\" (pm2 logs $SAFE_NAME to view logs).${NC}"
+  else
+    fail "pm2 (or index.js) not available — start the bot manually: node index.js"
+  fi
+
+  if [ -f deploy-commands.js ]; then
+    step "node deploy-commands.js"
+    node deploy-commands.js
+  fi
+
   cd "$START_DIR" || true
   echo
-  echo -e "${GREEN}[✓] Setup finished. Files are in: $DIR${NC}"
-  echo -e "${YELLOW}[!] Start the bot yourself:  cd $DIR && node index.js${NC}"
+  echo -e "${GREEN}[✓] $HOSTING_NAME setup finished.${NC}"
   pause
 }
 

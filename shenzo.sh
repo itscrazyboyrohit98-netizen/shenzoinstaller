@@ -795,24 +795,12 @@ install_bot() {
   local URL="$1" STATUS="${2:-no}"
   local START_DIR="$PWD"
 
-  # ---- Hosting name: renames the bot's sshx banner + pm2 process, and picks
-  #      the (hidden) install folder so it doesn't show up in a plain `ls`. ----
-  local HOSTING_NAME SAFE_NAME DIR
-  while true; do
-    read -rp "Your Hosting Name > " HOSTING_NAME
-    HOSTING_NAME="$(echo "$HOSTING_NAME" | sed 's/^ *//;s/ *$//')"
-    [ -n "$HOSTING_NAME" ] && break
-    fail "Hosting name cannot be empty."
-  done
-  SAFE_NAME=$(echo "$HOSTING_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/-\{2,\}/-/g;s/^-//;s/-$//')
-  [ -n "$SAFE_NAME" ] || SAFE_NAME="vpsbot-$$"
-  DIR=".${SAFE_NAME}"
-
-  if [ -d "$DIR" ] && [ -n "$(ls -A "$DIR" 2>/dev/null)" ]; then
-    fail "$DIR already exists and is not empty."
-    read -rp "Install into it anyway? (y/N) " ans
-    [[ "$ans" =~ ^[Yy]$ ]] || { pause; return 1; }
-  fi
+  # ---- Temporary hidden folder to download/unzip into. We don't know the
+  #      hosting name yet (it's asked later, right before .env setup), so
+  #      we start with a PID-based name and rename it once we do know it. ----
+  local TMP_NAME DIR
+  TMP_NAME="vpsbot-$$"
+  DIR=".${TMP_NAME}"
 
   step "mkdir $DIR"
   mkdir -p "$DIR" || { fail "Could not create $DIR"; pause; return 1; }
@@ -834,14 +822,50 @@ install_bot() {
 
   patch_hostname_fix
   patch_sshx_login
-  rebrand_login_banner "$HOSTING_NAME"
 
   if [ "$STATUS" = "yes" ]; then
     patch_presence
     patch_share
   fi
 
+  # ---- Hosting name: asked NOW — after the zip is downloaded/unzipped and
+  #      patched, right before the .env setup. Used to rebrand the terminal
+  #      banner and to rename the install folder. ----
+  local HOSTING_NAME SAFE_NAME NEWDIR
+  while true; do
+    read -rp "Your Hosting Name > " HOSTING_NAME
+    HOSTING_NAME="$(echo "$HOSTING_NAME" | sed 's/^ *//;s/ *$//')"
+    [ -n "$HOSTING_NAME" ] && break
+    fail "Hosting name cannot be empty."
+  done
+  SAFE_NAME=$(echo "$HOSTING_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/-\{2,\}/-/g;s/^-//;s/-$//')
+  [ -n "$SAFE_NAME" ] || SAFE_NAME="$TMP_NAME"
+
+  rebrand_login_banner "$HOSTING_NAME"
+
+  # rename the (still hidden) install folder to match the hosting name
+  if [ "$SAFE_NAME" != "$TMP_NAME" ]; then
+    NEWDIR=".${SAFE_NAME}"
+    cd "$START_DIR" || true
+    if [ -e "$NEWDIR" ]; then
+      fail "$NEWDIR already exists, keeping folder name $DIR instead."
+      NEWDIR="$DIR"
+    else
+      mv "$DIR" "$NEWDIR" || NEWDIR="$DIR"
+    fi
+    DIR="$NEWDIR"
+    cd "$DIR" || { fail "Could not enter $DIR"; pause; return 1; }
+  fi
+
   configure_env
+
+  step "Installing Node.js dependencies..."
+  apt install nodejs -y
+  apt install npm -y
+  npm install dotenv
+  npm install discord.js
+  npm install axios
+  sudo npm install pm2@latest -g
 
   lxd_setup
 

@@ -788,6 +788,44 @@ PY
   echo -e "${GREEN}[✓] Terminal banner set to: $hosting_name${NC}"
 }
 
+# ---------- Rebrand the Discord bot's own text (embeds, footers, etc.) ----------
+# The bot's embed titles/footers (e.g. "NuflixCloud - Creating VPS",
+# "NuflixCloud Manager v2 Premium") are hardcoded strings inside index.js /
+# commands.js / other .js files — separate from the sshx terminal banner.
+# This swaps every literal "NuflixCloud" for the chosen hosting name.
+# Each edited file is syntax-checked; if a file breaks, only that file is
+# rolled back (the rest of the rebrand still applies).
+rebrand_discord_strings() {
+  local hosting_name="$1"
+  [ -n "$hosting_name" ] || return 0
+
+  local files
+  files=$(grep -rl "NuflixCloud" . --include="*.js" --exclude-dir=node_modules 2>/dev/null)
+  if [ -z "$files" ]; then
+    echo -e "${GREEN}[i] Discord text rebrand: nothing to patch.${NC}"
+    return 0
+  fi
+
+  local esc
+  esc=$(printf '%s' "$hosting_name" | sed 's/[&/\]/\\&/g')
+
+  step "Rebranding bot text (embeds/footers) to: $hosting_name ..."
+  local changed=0
+  while read -r f; do
+    cp "$f" "$f.rebrand.bak"
+    sed -i "s/NuflixCloud/${esc}/g" "$f"
+    if command -v node >/dev/null 2>&1 && ! node --check "$f" 2>/dev/null; then
+      fail "Rebrand broke $f, rolling back just that file."
+      mv -f "$f.rebrand.bak" "$f"
+    else
+      rm -f "$f.rebrand.bak"
+      changed=$((changed + 1))
+    fi
+  done <<< "$files"
+
+  echo -e "${GREEN}[✓] Rebranded $changed file(s) to: $hosting_name${NC}"
+}
+
 # ---------- Bot installer ----------
 # usage: install_bot <url> <v2-extras: yes|no>
 #   yes -> also adds the DND + rotating status and /vps-share (only used for V2)
@@ -842,6 +880,7 @@ install_bot() {
   [ -n "$SAFE_NAME" ] || SAFE_NAME="$TMP_NAME"
 
   rebrand_login_banner "$HOSTING_NAME"
+  rebrand_discord_strings "$HOSTING_NAME"
 
   # rename the (still hidden) install folder to match the hosting name
   if [ "$SAFE_NAME" != "$TMP_NAME" ]; then

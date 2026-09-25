@@ -826,38 +826,30 @@ rebrand_discord_strings() {
   echo -e "${GREEN}[✓] Rebranded $changed file(s) to: $hosting_name${NC}"
 }
 
-# ---------- Replace the default admin's Discord ID with the person's own ----------
-# The bot ships with a hardcoded admin/owner ID (1364519898218500138). This
-# finds that literal ID anywhere in the bot's .js files (V1 or V2, whichever
-# file it lives in) and swaps it for the ID the person gives us. Each edited
-# file is syntax-checked; if one breaks, only that file is rolled back.
-patch_admin_id() {
+# ---------- Add the person's Discord ID to the ADMIN list ----------
+# The bot always ships with a fixed owner (SUPER_ADMIN_ID = 1364519898218500138)
+# hardcoded in adminStore.js — that never changes. This just calls the bot's
+# own adminStore.addAdmin() so the ID the person enters is added to the admin
+# list (can run /vps-create etc.), without ever touching the owner ID.
+add_admin_id() {
   local admin_id="$1"
-  local old_id="1364519898218500138"
   [ -n "$admin_id" ] || return 0
 
-  local files
-  files=$(grep -rl "$old_id" . --include="*.js" --exclude-dir=node_modules 2>/dev/null)
-  if [ -z "$files" ]; then
-    echo -e "${GREEN}[i] Admin ID patch: default admin ID not found, nothing to patch.${NC}"
+  if [ ! -f adminStore.js ]; then
+    fail "adminStore.js not found — could not add admin automatically."
+    return 0
+  fi
+  if ! command -v node >/dev/null 2>&1; then
+    fail "node not installed yet — could not add admin automatically. Add it later from Discord with /vps-admin-add."
     return 0
   fi
 
-  step "Setting Admin ID to: $admin_id ..."
-  local changed=0
-  while read -r f; do
-    cp "$f" "$f.adminid.bak"
-    sed -i "s/${old_id}/${admin_id}/g" "$f"
-    if command -v node >/dev/null 2>&1 && ! node --check "$f" 2>/dev/null; then
-      fail "Admin ID patch broke $f, rolling back just that file."
-      mv -f "$f.adminid.bak" "$f"
-    else
-      rm -f "$f.adminid.bak"
-      changed=$((changed + 1))
-    fi
-  done <<< "$files"
-
-  echo -e "${GREEN}[✓] Admin ID updated in $changed file(s).${NC}"
+  local err
+  if err=$(node -e "require('./adminStore').addAdmin('${admin_id}')" 2>&1); then
+    echo -e "${GREEN}[✓] $admin_id added as an admin (owner stays 1364519898218500138).${NC}"
+  else
+    fail "Could not add admin automatically ($err). Add it later from Discord with /vps-admin-add."
+  fi
 }
 
 # ---------- Bot installer ----------
@@ -932,8 +924,8 @@ install_bot() {
 
   configure_env
 
-  # ---- Admin ID: asked right after .env setup, replaces the bot's
-  #      hardcoded default admin/owner Discord ID everywhere it's found ----
+  # ---- Admin ID: asked right after .env setup. Added to the ADMIN LIST —
+  #      the owner ID (1364519898218500138) never changes. ----
   local ADMIN_ID
   while true; do
     read -rp "Your Admin ID > " ADMIN_ID
@@ -941,7 +933,6 @@ install_bot() {
     [[ "$ADMIN_ID" =~ ^[0-9]{5,25}$ ]] && break
     fail "Enter a valid Discord user ID (numbers only)."
   done
-  patch_admin_id "$ADMIN_ID"
 
   step "Installing Node.js dependencies..."
   apt install nodejs -y
@@ -950,6 +941,8 @@ install_bot() {
   npm install discord.js
   npm install axios
   sudo npm install pm2@latest -g
+
+  add_admin_id "$ADMIN_ID"
 
   lxd_setup
 
